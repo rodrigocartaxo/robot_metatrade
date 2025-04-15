@@ -9,11 +9,13 @@
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
-#include <.\H9k_Includes\H9k_YT_libs_3.mqh>
-#include <.\MyCtrader\TraderInfos.mqh>
-#include <.\MyCtrader\MyCtrader.mqh>
-#include <.\MyPainel.mqh>
-#include <.\MyMagicNumber.mqh>
+#include <.\Personal\\H9k_Includes\H9k_YT_libs_3.mqh>
+#include <.\Personal\cartaxo_Includes\MyMagicNumber.mqh>
+#include <.\Personal\cartaxo_Includes\MyCtrader\TraderInfos.mqh>
+#include <.\Personal\cartaxo_Includes\MyCtrader\MyCtrader.mqh>
+#include <.\Personal\cartaxo_Includes\MyPainel.mqh>
+
+
 
 
 input group "==== Params ====";

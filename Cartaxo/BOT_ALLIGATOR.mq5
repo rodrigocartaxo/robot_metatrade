@@ -1,8 +1,10 @@
-#include <.\H9k_Includes\H9k_YT_libs_3.mqh>
-#include <.\MyCtrader\TraderInfos.mqh>
-#include <.\MyCtrader\MyCtrader.mqh>
-#include <.\MyPainel.mqh>
-#include <.\MyMagicNumber.mqh>
+
+#include <.\Personal\H9k_Includes\H9k_YT_libs_3.mqh>
+#include <.\Personal\cartaxo_Includes\MyMagicNumber.mqh>
+#include <.\Personal\cartaxo_Includes\MyCtrader\TraderInfos.mqh>
+#include <.\Personal\cartaxo_Includes\MyCtrader\MyCtrader.mqh>
+#include <.\Personal\cartaxo_Includes\MyPainel.mqh>
+
 
 // Structure to hold currency pair specific data
 struct CurrencyData {
@@ -125,7 +127,7 @@ void ProcessCurrencyPair(CurrencyData &currencyData) {
     if(!CopyBuffer(currencyData.handleAlligator, GATORTEETH_LINE, 0, 2, currencyData.teethBuffer)) return;
     if(!CopyBuffer(currencyData.handleAlligator, GATORLIPS_LINE, 0, 2, currencyData.lipsBuffer)) return;
     
-    if(HasPosition(tradeInfos.iMagicNumber, currencyData.symbol) != 0) return;
+    if(HasPosition(tradeInfos.iMagicNumber) != 0) return;
     
     double price_step = SymbolInfoDouble(currencyData.symbol, SYMBOL_TRADE_TICK_SIZE);
     
