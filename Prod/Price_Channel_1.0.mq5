@@ -6,6 +6,7 @@
 #property copyright "Copyright 2024"
 #property link      ""
 #property version   "1.00"
+#property description "Expert Advisor para Price Channel com API externa"
 
 //+------------------------------------------------------------------+
 //| Sugestões para Futuras Melhorias:                                  |
@@ -31,7 +32,6 @@
 //|    - Implementar outros tipos de canais                           |
 //|                                                                     |
 //| 5. Filtros Adicionais:                                            |
-//|    - Criar filtros de horário/dia                                 |
 //|    - Adicionar filtros de volatilidade                           |
 //|    - Implementar filtros de spread                               |
 //+------------------------------------------------------------------+
@@ -40,11 +40,13 @@
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
 #include <.\Personal\H9k_Includes\H9k_libs_4.mqh>
+#include <.\Personal\cartaxo_Includes\MyMagicNumber.mqh>
 // Enumerações
 enum ENUM_CHANNEL_LEVEL
 {
     NIVEL_1 = 1,    // Nível 1 
-    NIVEL_2 = 2     // Nível 2 
+    NIVEL_2 = 2,    // Nível 2 
+    NIVEL_3 = 3     // Nível 3 
 };
 
 
@@ -54,18 +56,23 @@ enum ENUM_SIM_NAO
     sim   // On
 };
 
+
+//--- input parameters
+input group "Daytrade Window"
+input ENUM_SIM_NAO i24h = nao; //Liga o modo 24h (forex)
+input string iHoraIni  = "09:05:00"; //Hora inicio
+input string iHoraFim  = "17:30:00"; //Hora fim
+input string iHoraInterval1                   = "12:00"; //Hora Inicio Pausa
+input string iHoraInterval2                   = "13:30"; //Hora Fim Pausa
+
 // Parâmetros gerais
 input group "=== Configurações Gerais ==="
 input ENUM_TIMEFRAMES Periodo                 = PERIOD_M2;  // Período do Gráfico
 input ENUM_CHANNEL_LEVEL NivelAtivo           = NIVEL_1;  // Nível do Canal a Exibir
 input double   Volume                         = 10;       // Volume das Operações
-input ulong    MagicNumber                    = 123456;  // Número Mágico do EA
-input string iHoraIni                         = "09:00:00"; //Hora inicio
-input string iHoraFim                         = "16:30:00"; //Hora fim
 input ENUM_SIM_NAO MostrarLogs                = sim;      // Mostrar logs detalhados
 input ENUM_SIM_NAO AtivarInterval             = sim;      // Ativar Hora de pausa 
-input string iHoraInterval1                   = "12:00:00"; //Hora Inicio Pausa
-input string iHoraInterval2                   = "13:30:00"; //Hora Fim Pausa
+input int numeroLinhas                        =  25 ; //Numero de canais
 
 
 input group "=== Configurações Canais ==="
@@ -93,11 +100,12 @@ input ENUM_TIMEFRAMES       iATRTimeFrame         = PERIOD_M5;           // ATR 
 
 
 input group "=== Risk Management ==="
-input int    iDailyTarget = 10000;       // Meta de ganho da operação
-input int    iLossTarget  = 500;       // Loss máximo da operação
-input double iDDTrigger = 300;         // Valor para ativar o drawdown
-input double iDrawDown  = 80;          // Percentual do valor para fechar posição
 input ENUM_SIM_NAO riskManagement            = sim;   // Ativar Risk Management
+input int    iDailyTarget                    = 10000;    // Meta de ganho 
+input int    iLossTarget                     = 500;     // Loss máximo 
+input double iDDTrigger                      = 300;     // Valor para ativar o drawdown
+input double iDrawDown                       = 80;       // Percentual do valor para fechar posição
+
 
 // Variáveis globais
 double ultimoPreco,vMaxProfit;
@@ -105,6 +113,7 @@ string prefixoObjeto = "PriceChannel_";
 double tickSize; // Tamanho do tick do ativo
 double incrementoTickCurrent = 0;
 MqlRates rates[];
+MqlRates rateGatilho;
 
 // Variáveis globais de trading
 CTrade trade;
@@ -125,6 +134,11 @@ bool vTPTrigger = false;
 bool vTargetLock = false;
 bool vDDTriggerActive = false;
 
+double l_result = 0.0;
+
+ulong MagicNumber = 0.0; 
+
+MyMagicNumber myMagicNumber;
 
 // Variáveis de gerenciamento de posição
 int fechoParcialContador = 0;
@@ -138,6 +152,17 @@ struct NivelCanal {
     double incrementoTick;
     color corBase;
     string prefixo;
+    int nivel;
+};
+
+//+------------------------------------------------------------------+
+//| Estrutura para armazenar dados do JSON                            |
+//+------------------------------------------------------------------+
+struct ConfiguracaoCanal {
+    string ativo;
+    double marcoZero;
+    double tamanhoCanal;
+    int nivel;
 };
 
 NivelCanal niveis[];
@@ -154,29 +179,89 @@ void LogInfo(string mensagem)
 }
 
 //+------------------------------------------------------------------+
+//| Função para calcular Magic Number único e consistente             |
+//+------------------------------------------------------------------+
+ulong CalcularMagicNumber(const string eaName, const string symbol) {
+    ulong hash = 5381;
+    string key = eaName + ":" + symbol;
+    for(int i = 0; i < StringLen(key); i++) {
+        hash = ((hash << 5) + hash) + (uchar)StringGetCharacter(key, i); // hash * 33 + c
+    }
+    // Garante que o número não seja zero e caiba em 9 dígitos (limite do MetaTrader)
+    hash = hash % 1000000000ULL;
+    if(hash == 0) hash = 1;
+    return hash;
+}
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                     |
 //+------------------------------------------------------------------+
-int OnInit()
-{
-    // Configurar os níveis com valores fixos
-    ArrayResize(niveis, 2);
+int OnInit(){
     
-    // Configurar Nível 1 (hardcoded)
-    niveis[0].precoBase = 134120;
-    niveis[0].incrementoTick = 195;
-    niveis[0].corBase = clrDodgerBlue;
-    niveis[0].prefixo = "Nivel1_";
+    ChartSetSymbolPeriod(0, _Symbol, Periodo);
+    ChartSetInteger(0,CHART_SHOW_GRID,false);
     
-    // Configurar Nível 2 (hardcoded)
-    niveis[1].precoBase = 121800;
-    niveis[1].incrementoTick = 750;
-    niveis[1].corBase = clrMagenta;
-    niveis[1].prefixo = "Nivel2_";
+    ResetLastError();
+        
+    if (AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO) {
+        Print("Este EA só pode ser executado em contas em DEMO.");
+        return INIT_FAILED;
+    }
+    
+    MagicNumber = CalcularMagicNumber(MQLInfoString(MQL_PROGRAM_NAME), _Symbol); 
+    
+    // Configurar os níveis
+    ArrayResize(niveis, 3);
+    
+    // Carregar configuração apenas do nível selecionado da API
+    ConfiguracaoCanal config;
+    int nivelSelecionado = (int)NivelAtivo;
+    
+    if(!CarregarConfiguracaoAPI(_Symbol, nivelSelecionado, config))
+    {
+        LogInfo("ERRO: Falha ao carregar configuração do Nível " + IntegerToString(nivelSelecionado) + " da API");
+        return INIT_FAILED;
+    }
+    
+    // Configurar apenas o nível selecionado
+    int nivelIndex = nivelSelecionado - 1;
+    if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis))
+    {
+        niveis[nivelIndex].precoBase = config.marcoZero;
+        niveis[nivelIndex].incrementoTick = config.tamanhoCanal;
+        niveis[nivelIndex].nivel = config.nivel;
+        
+        // Definir cor baseada no nível
+        switch(nivelSelecionado)
+        {
+            case 1:
+                niveis[nivelIndex].corBase = clrDodgerBlue;
+                niveis[nivelIndex].prefixo = "Nivel1_";
+                break;
+            case 2:
+                niveis[nivelIndex].corBase = clrMagenta;
+                niveis[nivelIndex].prefixo = "Nivel2_";
+                break;
+            case 3:
+                niveis[nivelIndex].corBase = clrOrange;
+                niveis[nivelIndex].prefixo = "Nivel3_";
+                break;
+        }
+        
+        LogInfo("DEBUG: Nível " + IntegerToString(nivelSelecionado) + " configurado - Base: " + 
+                DoubleToString(niveis[nivelIndex].precoBase, _Digits) + 
+                " Incremento: " + DoubleToString(niveis[nivelIndex].incrementoTick, _Digits) +
+                " Nível: " + IntegerToString(niveis[nivelIndex].nivel));
+    }
+    else
+    {
+        LogInfo("ERRO: Nível inválido selecionado!");
+        return INIT_FAILED;
+    }
     
     // Obter o tamanho do tick do ativo
     tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-    if(tickSize == 0)
-    {
+    if(tickSize == 0){
         Print("ERRO: Falha ao obter o tamanho do tick do ativo!");
         return INIT_FAILED;
     }
@@ -186,30 +271,28 @@ int OnInit()
     handleAtr = iATR(_Symbol, iATRTimeFrame, iATRPeriod);
     
     if (handleAtr==INVALID_HANDLE){
-
-      Print("FAILED TO CREATE HANDLE OF THE iATR INDICATOR. REVERTING NOW");
-      return INIT_FAILED ;
-   }
+        Print("FAILED TO CREATE HANDLE OF THE iATR INDICATOR. REVERTING NOW");
+        return INIT_FAILED;
+    }
    
     // Configurar array de rates
     ArraySetAsSeries(rates, true);
     ArraySetAsSeries(dataATR,true);
     vMaxProfit = 0;
+    
     // Limpar objetos antigos
     LimparObjetos();
     
     // Criar apenas o nível selecionado
-    int nivelIndex = (int)NivelAtivo - 1;
     if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis))
     {
-        LogInfo("Configurando Nível " + IntegerToString(nivelIndex + 1));
+        LogInfo("Configurando Nível " + IntegerToString(nivelSelecionado));
         LogInfo("Preço Base: " + DoubleToString(niveis[nivelIndex].precoBase, _Digits));
         LogInfo("Incremento: " + DoubleToString(niveis[nivelIndex].incrementoTick, 0));
         incrementoTickCurrent = niveis[nivelIndex].incrementoTick;
         CriarLinhasNivel(niveis[nivelIndex]);
     }
-    else
-    {
+    else {
         Print("ERRO: Nível inválido selecionado!");
         return INIT_FAILED;
     }
@@ -230,8 +313,7 @@ int OnInit()
         vTargetLock = false;
     }
     
-    
-    PrintFormat("[%d] Inicializado com sucesso!", MagicNumber);
+    LogInfo(StringFormat("[%d] Inicializado com sucesso!", MagicNumber));
     
     return(INIT_SUCCEEDED);
 }
@@ -264,12 +346,15 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 //| Expert tick function                                              |
 //+------------------------------------------------------------------+
-void OnTick()
-{
+void OnTick(){
     
-    double l_result = DailyResult(MagicNumber) + OpenResult(MagicNumber);
+    int open_positions = HasPosition(MagicNumber);
+    int open_orders    = OpenOrdersCount(MagicNumber);
     
-    if (!allowed_by_hour(iHoraIni, iHoraFim)) {
+    l_result = DailyResult(MagicNumber) + OpenResult(MagicNumber);
+    
+    
+    if (!i24h && !allowed_by_hour(iHoraIni, iHoraFim)) {
         closeAllPositions(trade, MagicNumber);
         closeAllOpenOrders(trade, MagicNumber);        
         vTargetLock = false;
@@ -277,47 +362,17 @@ void OnTick()
         return;
     }
     
-    if (riskManagement == sim ){
-       if(vTargetLock == true) {
-           closeAllOpenOrders(trade, MagicNumber);
-           closeAllPositions(trade, MagicNumber);        
-           return;
-       }    
+    if(AtivarInterval == sim){
+      if(EstaNoHorarioDePausa(iHoraInterval1,iHoraInterval2)){
+         if (isNewBar(Periodo)) {LogInfo("INFO: Hora de intervalo ativada ");};
+         return;
+      }  
+    }
+    
+    if (riskManagement == sim){
+         GerenciarRisk();
+     }   
        
-       if(l_result >= iDDTrigger) {
-           if(!vDDTriggerActive) LogInfo(StringFormat("[%d] Drawdown trigger activated (%.2f).", MagicNumber, l_result));
-   
-           vDDTriggerActive = true;
-           if (vMaxProfit < l_result) vMaxProfit = l_result;        
-       }
-       if(vDDTriggerActive && l_result <= (1 - iDrawDown/100)*vMaxProfit) {
-           LogInfo(StringFormat("[%d] Drawdown %.2f achieved (%.2f / %.2f).", MagicNumber, iDrawDown, vMaxProfit, l_result));
-           closeAllOpenOrders(trade, MagicNumber);
-           closeAllPositions(trade, MagicNumber); 
-           vTargetLock = true;
-           return;
-       }
-   
-       if(l_result >= iDailyTarget) {
-           LogInfo(StringFormat(" Daily Target %.2f achieved %.2f.", MagicNumber,  l_result));
-           closeAllOpenOrders(trade, MagicNumber);
-           closeAllPositions(trade, MagicNumber);        
-           vTargetLock = true;
-           return;
-       }
-       
-       if((DailyResult(MagicNumber) + OpenResult(MagicNumber)) <= -1 * iLossTarget) {
-          LogInfo(StringFormat(" Max Loss Target %.2f achieved %.2f.", MagicNumber,  l_result));
-          closeAllOpenOrders(trade, MagicNumber);
-          closeAllPositions(trade, MagicNumber);        
-          vTargetLock = true;
-          return;
-       }
-       if (vTargetLock){
-           LogInfo(StringFormat("[%d] Target ok !!! (%.2f).", MagicNumber, l_result));
-           return;
-       }
-    }   
     // Obter dados do último candle
     if(CopyRates(_Symbol, Periodo, 0, 3, rates) <= 0)
     {
@@ -327,12 +382,7 @@ void OnTick()
     
     ArraySetAsSeries(rates, true);
     
-    if(AtivarInterval == sim){
-      if(EstaNoHorarioDePausa(iHoraInterval1,iHoraInterval2)){
-         LogInfo("INFO: Hora de intervalo ativada ");
-         return;
-      }  
-    }
+    
     // Verificar apenas o nível selecionado
     int nivelIndex = (int)NivelAtivo - 1;
     if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)){
@@ -357,14 +407,58 @@ void OnTick()
     
 }
 
+void GerenciarRisk(){
+   
+   if (isNewBar(Periodo)){ LogInfo(StringFormat("[%d] Result of day at moment (%.2f / %.2f).", MagicNumber, iDailyTarget, l_result));}
+   
+   if(vTargetLock == true) {
+        if (isNewBar(Periodo)){ LogInfo(StringFormat("[%d] DailyTarget achieved (%.2f / %.2f).", MagicNumber, iDailyTarget, l_result));}
+        closeAllOpenOrders(trade, MagicNumber);
+        closeAllPositions(trade, MagicNumber);        
+        return;
+    }    
+    
+    if(l_result >= iDDTrigger) {
+        if(!vDDTriggerActive) PrintFormat("[%d] Drawdown trigger activated (%.2f).", MagicNumber, l_result);
+        vDDTriggerActive = true;
+        if (vMaxProfit < l_result) vMaxProfit = l_result;        
+    }
+    
+    if(vDDTriggerActive && l_result <= (1 - iDrawDown/100)*vMaxProfit) {
+        PrintFormat("[%d] Drawdown %.2f achieved (%.2f / %.2f).", MagicNumber, iDrawDown, vMaxProfit, l_result);
+        closeAllOpenOrders(trade, MagicNumber);
+        closeAllPositions(trade, MagicNumber); 
+        vTargetLock = true;
+        return;
+    }
+
+    if(l_result >= iDailyTarget) {
+        PrintFormat("[%d] DailyTarget achieved (%.2f / %.2f).", MagicNumber, iDailyTarget, l_result);
+        closeAllOpenOrders(trade, MagicNumber);
+        closeAllPositions(trade, MagicNumber);        
+        vTargetLock = true;
+        return;
+    }
+    
+    if((DailyResult(MagicNumber) + OpenResult(MagicNumber)) <= -1 * iLossTarget) {
+        PrintFormat("[%d] LossTarge achieved  %.2f.", MagicNumber, iLossTarget);
+        closeAllOpenOrders(trade, MagicNumber);
+        closeAllPositions(trade, MagicNumber);        
+        vTargetLock = true;
+        return;
+    }
+}
+
+
+
 //+------------------------------------------------------------------+
 //| Calcula os níveis de preço das linhas para um nível específico    |
 //+------------------------------------------------------------------+
 void CalcularLinhasPreco(double &linhas[], NivelCanal &nivel)
 {
-    ArrayResize(linhas, 25);
+    ArrayResize(linhas, numeroLinhas);
     
-    for(int i = 0; i < 25; i++)
+    for(int i = 0; i < numeroLinhas; i++)
     {
         linhas[i] = nivel.precoBase + (i * nivel.incrementoTick);
     }
@@ -380,6 +474,9 @@ void CriarLinhasNivel(NivelCanal &nivel)
     
     datetime tempo = TimeCurrent();
     double pontoPip = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    
+    LogInfo("DEBUG: Criando linhas para nível - Base: " + DoubleToString(nivel.precoBase, _Digits) + 
+            " Incremento: " + DoubleToString(nivel.incrementoTick, _Digits) +  " Nivel : "+ IntegerToString(nivel.nivel)  );
     
     for(int i = 0; i < ArraySize(linhasPreco); i++)
     {
@@ -416,6 +513,8 @@ void CriarLinhasNivel(NivelCanal &nivel)
             ObjectSetInteger(0, nomeTexto, OBJPROP_HIDDEN, true);
             ObjectSetInteger(0, nomeTexto, OBJPROP_FONTSIZE, 10);
         }
+        
+        LogInfo("DEBUG: Linha criada - Nome: " + nomeObjeto + " Preço: " + DoubleToString(linhasPreco[i], _Digits));
     }
     
     ChartRedraw(0);
@@ -483,7 +582,7 @@ void AtualizarLinhasNivel(double &linhasPreco[], NivelCanal &nivel)
 void LimparObjetos()
 {
     int count = ObjectsDeleteAll(0, prefixoObjeto);
-    LogInfo("Objetos removidos: " + IntegerToString(count));
+    //LogInfo("Objetos removidos: " + IntegerToString(count));
 }
 
 //+------------------------------------------------------------------+
@@ -529,72 +628,159 @@ double refreshATR( ){
 //+------------------------------------------------------------------+
 //| Cacula stop loss                                                 |
 //+------------------------------------------------------------------+
-
-double calculaStopLoss(string tipo){
-   
-    double tamanhoCandle = MathAbs(rates[1].high - rates[1].low);
-    if (tipo == "compra" )
-    return NormalizarPreco(rates[1].high -  (tamanhoCandle * 0.75));
-    else if (tipo == "venda" )
-    return NormalizarPreco(rates[1].low +  (tamanhoCandle * 0.75));
-    return 0;
-}
-//+------------------------------------------------------------------+
-//| Verifica e executa entradas                                        |
-//+------------------------------------------------------------------+
-void VerificarEntradas(double &linhas[], int indice_linha){
-    if(HasPosition(MagicNumber)>0)
-        return;
+double calculaStopLoss(string tipo, int indice, double &linhas[]){
+    double price_step = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+    double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
+    double stop = 0.0;
     
-    // Compra: fechamento acima da linha
-    if(rates[0].close > linhas[indice_linha])
-    {
-        double takeProfit = EncontrarProximoNivelSuperior(linhas, indice_linha, rates[0].close);
-        if(takeProfit > 0)
-        {
-            double stop_loss = calculaStopLoss("compra");
-            ExecutarCompra(rates[1].open, stop_loss, takeProfit);
-        }
+    if (tipo == "compra" ){
+        double precoEntrada = rateGatilho.close;
+        stop = roundPriceH9K(precoEntrada + (tamanhoCandle * 1.75), price_step);
+        LogInfo("DEBUG: Compra (INVERTIDO) - entrada: " + DoubleToString(precoEntrada, _Digits) + 
+               " stop: " + DoubleToString(stop, _Digits) + 
+               " diferença: " + DoubleToString(stop - precoEntrada, _Digits));
+    } else if (tipo == "venda" ){
+        double precoEntrada = rateGatilho.open;
+        stop = roundPriceH9K(precoEntrada - (tamanhoCandle * 1.75), price_step);
+        LogInfo("DEBUG: Venda (INVERTIDO) - entrada: " + DoubleToString(precoEntrada, _Digits) + 
+               " stop: " + DoubleToString(stop, _Digits) + 
+               " diferença: " + DoubleToString(precoEntrada - stop, _Digits));
     }
-    // Venda: fechamento abaixo da linha
-    else if(rates[0].close < linhas[indice_linha])
-    {
-        double takeProfit = EncontrarProximoNivelInferior(linhas, indice_linha, rates[0].close);
-        if(takeProfit > 0)
-        {
-            double stop_loss = calculaStopLoss("venda");
-            ExecutarVenda(rates[1].close,stop_loss , takeProfit);
-        }
-    }
+    
+    LogInfo("DEBUG: Stop loss calculado para " + tipo + " - entrada: " + DoubleToString((tipo == "compra") ? rateGatilho.close : rateGatilho.open, _Digits) + " stop: " + DoubleToString(stop, _Digits));
+    return stop;
 }
 
 //+------------------------------------------------------------------+
 //| Verifica gatilhos nos preços de abertura e fechamento             |
-//+------------------------------------------------------------------+
-void VerificarGatilhos(double &linhas[])
-{
+//+-------------------------------------------high-------------------+
+void VerificarGatilhos(double &linhas[]){
+
+    
+
     // Verificar se o candle atravessa alguma linha
     for(int i = 0; i < ArraySize(linhas); i++)
     {
         // Verifica se o candle atravessou a linha (abertura abaixo e fechamento acima OU vice-versa)
         if((rates[1].open < linhas[i] && rates[1].close > linhas[i]) || 
            (rates[1].open > linhas[i] && rates[1].close < linhas[i])){
-            
+             rateGatilho = rates[1];
+             double tamanhoCandle = MathAbs(rates[1].high - rates[1].low);
+              LogInfo("INFO: Gatilho acionado: " +
+                     "Linha: "+ DoubleToString(linhas[i])+
+                     "Tamanho do candle: "+ DoubleToString(tamanhoCandle)+
+                     "Open: "+ DoubleToString(rates[1].open)+
+                     "Close: "+ DoubleToString(rates[1].close)); 
+                     
             VerificarEntradas(linhas, i);
             break;
-        }
+        };
     }
 }
 
-
+//+------------------------------------------------------------------+
+//| Verifica e executa entradas                                        |
+//+------------------------------------------------------------------+
+void VerificarEntradas(double &linhas[], int indice_linha){
+    
+    
+    double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+    
+    LogInfo("DEBUG: StopLevel exigido pelo ativo: " + DoubleToString(stopLevel, _Digits));
+    LogInfo("DEBUG: TickSize do ativo: " + DoubleToString(tickSize, _Digits));
+    
+    // Compra: fechamento acima da linha -> EXECUTA COMPRA
+    if(rates[0].close > rateGatilho.close && rates[0].close > linhas[indice_linha])
+    {
+        // Permite apenas uma ordem aberta ou pendente por vez
+        if (has_open_position(MagicNumber) || has_open_order(MagicNumber)) {
+            LogInfo("INFO: Já existe uma posição ou ordem pendente aberta. Não será aberta nova ordem de COMPRA.");
+            return;
+        }
+        double takeProfit = EncontrarProximoNivelSuperior(linhas, indice_linha, rates[0].close); // TP acima
+        if(takeProfit > 0)
+        {
+            double precoEntrada = rateGatilho.close;
+            double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
+            double stop_calc = precoEntrada - (tamanhoCandle * 0.75);
+            double minDist = MathMax(stopLevel, tickSize * 4);
+            double stop_loss = MathMin(roundPriceH9K(stop_calc, tickSize), precoEntrada - tickSize);
+            if (stop_loss >= precoEntrada) stop_loss = precoEntrada - tickSize;
+            if ((precoEntrada - stop_loss) < minDist)
+                stop_loss = precoEntrada - minDist;
+            LogInfo("DEBUG: (TESTE) Compra - entrada: " + DoubleToString(precoEntrada, _Digits) + " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits));
+            LogInfo("DEBUG: Diferença SL: " + DoubleToString(MathAbs(precoEntrada - stop_loss), _Digits) + " Diferença TP: " + DoubleToString(MathAbs(takeProfit - precoEntrada), _Digits));
+            
+            // Validação para COMPRA
+            LogInfo("DEBUG: Validação COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
+                   " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits));
+            LogInfo("DEBUG: Condições - stop < entrada: " + (stop_loss < precoEntrada ? "SIM" : "NÃO") + 
+                   " tp > entrada: " + (takeProfit > precoEntrada ? "SIM" : "NÃO"));
+            LogInfo("DEBUG: Distância SL: " + DoubleToString(precoEntrada - stop_loss, _Digits) + ", Distância TP: " + DoubleToString(takeProfit - precoEntrada, _Digits));
+            
+            if(stop_loss < precoEntrada && takeProfit > precoEntrada &&
+               (precoEntrada - stop_loss > stopLevel) && (takeProfit - precoEntrada > stopLevel)) {
+                LogInfo("DEBUG: Executando COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
+                       " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits));
+                ExecutarCompra(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize));
+            } else {
+                LogInfo("ERRO: Preços inválidos para COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
+                       " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits) +
+                       " (verifique se SL/TP respeitam o stop level mínimo: " + DoubleToString(stopLevel, _Digits) + ")");
+            }
+        }
+    }
+    // Venda: fechamento abaixo da linha -> EXECUTA VENDA
+    else if(rates[0].close < rateGatilho.open && rates[0].close < linhas[indice_linha]){ 
+        // Permite apenas uma ordem aberta ou pendente por vez
+        if (has_open_position(MagicNumber) || has_open_order(MagicNumber)) {
+            LogInfo("INFO: Já existe uma posição ou ordem pendente aberta. Não será aberta nova ordem de VENDA.");
+            return;
+        }
+        double takeProfit = EncontrarProximoNivelInferior(linhas, indice_linha, rates[0].close); // TP abaixo
+        if(takeProfit > 0)
+        {
+            double precoEntrada = rateGatilho.open;
+            double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
+            double stop_calc = precoEntrada + (tamanhoCandle * 0.75);
+            double minDist = MathMax(stopLevel, tickSize * 4);
+            double stop_loss = MathMax(roundPriceH9K(stop_calc, tickSize), precoEntrada + tickSize);
+            if (stop_loss <= precoEntrada) stop_loss = precoEntrada + tickSize;
+            if ((stop_loss - precoEntrada) < minDist)
+                stop_loss = precoEntrada + minDist;
+            LogInfo("DEBUG: (TESTE) Venda - entrada: " + DoubleToString(precoEntrada, _Digits) + " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits));
+            LogInfo("DEBUG: Diferença SL: " + DoubleToString(MathAbs(precoEntrada - stop_loss), _Digits) + " Diferença TP: " + DoubleToString(MathAbs(takeProfit - precoEntrada), _Digits));
+            
+            // Validação para VENDA
+            LogInfo("DEBUG: Validação VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
+                   " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits));
+            LogInfo("DEBUG: Condições - stop > entrada: " + (stop_loss > precoEntrada ? "SIM" : "NÃO") + 
+                   " tp < entrada: " + (takeProfit < precoEntrada ? "SIM" : "NÃO"));
+            LogInfo("DEBUG: Distância SL: " + DoubleToString(stop_loss - precoEntrada, _Digits) + ", Distância TP: " + DoubleToString(precoEntrada - takeProfit, _Digits));
+            
+            if(stop_loss > precoEntrada && takeProfit < precoEntrada &&
+               (stop_loss - precoEntrada > stopLevel) && (precoEntrada - takeProfit > stopLevel)) {
+                LogInfo("DEBUG: Executando VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
+                       " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits));
+                ExecutarVenda(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize));
+            } else {
+                LogInfo("ERRO: Preços inválidos para VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
+                       " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits) +
+                       " (verifique se SL/TP respeitam o stop level mínimo: " + DoubleToString(stopLevel, _Digits) + ")");
+            }
+        }
+    }
+}
 
 //+------------------------------------------------------------------+
 //| Executa ordem de compra                                            |
 //+------------------------------------------------------------------+
 bool ExecutarCompra(double preco_entrada, double stop_loss, double take_profit)
 {
+  
     // Primeiro faz a ordem com volume dobrado e sem take profit
-    if(trade.Buy(Volume , _Symbol, preco_entrada, stop_loss, take_profit,DoubleToString(MagicNumber))){
+    if(trade.Buy(Volume , _Symbol,preco_entrada,  stop_loss, take_profit,DoubleToString(MagicNumber))){
+       
         posicaoAberta = true;
         posicaoTicket = trade.ResultOrder();
         volumeOriginal = Volume;
@@ -618,7 +804,7 @@ bool ExecutarCompra(double preco_entrada, double stop_loss, double take_profit)
 bool ExecutarVenda(double preco_entrada, double stop_loss, double take_profit)
 {
     // Primeiro faz a ordem com volume dobrado e sem take profit
-    if(trade.Sell(Volume , _Symbol, preco_entrada, stop_loss,take_profit,DoubleToString(MagicNumber))){
+    if(trade.Sell(Volume ,  _Symbol, preco_entrada ,stop_loss,take_profit,DoubleToString(MagicNumber))){
         posicaoAberta = true;
         posicaoTicket = trade.ResultOrder();
         volumeOriginal = Volume;
@@ -890,4 +1076,175 @@ int ConverterHorarioParaMinutos(string horario)
     }
     
     return horas * 60 + minutos;
+}
+
+//+------------------------------------------------------------------+
+//| Função para fazer chamada HTTP para endpoint externo              |
+//+------------------------------------------------------------------+
+string FazerChamadaHTTP(string symbol, int nivel)
+{
+    string url = "http://127.0.0.1:8080/api/fonte-dados/" + symbol + "/" + IntegerToString(nivel);
+    
+    LogInfo("DEBUG: Fazendo chamada HTTP para: " + url);
+    
+    // Array para armazenar os dados da resposta
+    uchar post_data[];
+    uchar result_data[];
+    string headers;
+    
+    // Faz a requisição HTTP
+    int result = WebRequest("GET", url, headers, 5000, post_data, result_data, headers);
+    
+    if(result == 200) // Sucesso
+    {
+        string response = CharArrayToString(result_data);
+        LogInfo("DEBUG: Resposta HTTP recebida: " + response);
+        return response;
+    }
+    else
+    {
+        // Códigos de erro detalhados
+        string errorMsg = "";
+        switch(result)
+        {
+            case -1:
+                errorMsg = "WebRequest não permitido. Verifique: Ferramentas -> Opções -> Expert Advisors ->  lista";
+                break;
+            case -2:
+                errorMsg = "URL inválida";
+                break;
+            case -3:
+                errorMsg = "Timeout da requisição";
+                break;
+            case -4:
+                errorMsg = "Falha na requisição HTTP";
+                break;
+            default:
+                errorMsg = "Erro desconhecido";
+                break;
+        }
+        
+        LogInfo("ERRO: Falha na chamada HTTP. Código: " + IntegerToString(result) + " - " + errorMsg);
+        LogInfo("INFO: Usando configuração padrão como fallback");
+        return CriarConfiguracaoPadrao(symbol, nivel);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Função para criar configuração padrão quando API não está disponível |
+//+------------------------------------------------------------------+
+string CriarConfiguracaoPadrao(string symbol, int nivel)
+{
+    string config = "{\"ativo\":\"" + symbol + "\",\"marcoZero\":121800,\"tamanhoCanal\":748,\"nivel\":" + DoubleToString(nivel) + "}";
+    LogInfo("DEBUG: Configuração padrão criada para nível " + IntegerToString(nivel) + ": " + config);
+    return config;
+}
+
+//+------------------------------------------------------------------+
+//| Função para processar resposta JSON da API                        |
+//+------------------------------------------------------------------+
+bool ProcessarRespostaAPI(string response, ConfiguracaoCanal &config)
+{
+    if(StringLen(response) == 0)
+    {
+        LogInfo("ERRO: Resposta vazia da API");
+        return false;
+    }
+    
+    // Remove espaços e quebras de linha
+    StringTrimLeft(response);
+    StringTrimRight(response);
+    
+    LogInfo("DEBUG: Processando resposta JSON: " + response);
+    
+    // Extrai os valores usando StringFind e StringSubstr
+    int posAtivo = StringFind(response, "\"ativo\":");
+    int posMarcoZero = StringFind(response, "\"marcoZero\":");
+    int posTamanhoCanal = StringFind(response, "\"tamanhoCanal\":");
+    int posNivel = StringFind(response, "\"nivel\":");
+    
+    if(posAtivo >= 0 && posMarcoZero >= 0 && posTamanhoCanal >= 0 && posNivel >= 0)
+    {
+        // Extrai o Ativo
+        int startAtivo = StringFind(response, "\"", posAtivo + 8) + 1;
+        int endAtivo = StringFind(response, "\"", startAtivo);
+        config.ativo = StringSubstr(response, startAtivo, endAtivo - startAtivo);
+        
+        // Extrai o Marco Zero
+        int startMarcoZero = StringFind(response, ":", posMarcoZero) + 1;
+        int endMarcoZero = StringFind(response, ",", startMarcoZero);
+        if(endMarcoZero == -1) endMarcoZero = StringFind(response, "}", startMarcoZero);
+        config.marcoZero = StringToDouble(StringSubstr(response, startMarcoZero, endMarcoZero - startMarcoZero));
+        
+        // Extrai o Tamanho do Canal
+        int startTamanhoCanal = StringFind(response, ":", posTamanhoCanal) + 1;
+        int endTamanhoCanal = StringFind(response, ",", startTamanhoCanal);
+        if(endTamanhoCanal == -1) endTamanhoCanal = StringFind(response, "}", startTamanhoCanal);
+        config.tamanhoCanal = StringToDouble(StringSubstr(response, startTamanhoCanal, endTamanhoCanal - startTamanhoCanal));
+        
+        // Extrai o Nível (agora é inteiro)
+        int startNivel = StringFind(response, ":", posNivel) + 1;
+        int endNivel = StringFind(response, ",", startNivel);
+        if(endNivel == -1) endNivel = StringFind(response, "}", startNivel);
+        string nivelStr = StringSubstr(response, startNivel, endNivel - startNivel);
+        StringTrimLeft(nivelStr);
+        StringTrimRight(nivelStr);
+        config.nivel = StringToInteger(nivelStr);
+        
+        LogInfo("Configuração carregada com sucesso da API:");
+        LogInfo("Ativo: " + config.ativo);
+        LogInfo("Marco Zero: " + DoubleToString(config.marcoZero, _Digits));
+        LogInfo("Tamanho Canal: " + DoubleToString(config.tamanhoCanal, _Digits));
+        LogInfo("Nível: " + IntegerToString(config.nivel));
+        
+        return true;
+    }
+    
+    LogInfo("ERRO: Formato JSON inválido na resposta da API");
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Função para carregar configuração da API                          |
+//+------------------------------------------------------------------+
+bool CarregarConfiguracaoAPI(string symbol, int nivel, ConfiguracaoCanal &config)
+{
+    string response = FazerChamadaHTTP(symbol, nivel);
+    if(StringLen(response) > 0)
+    {
+        return ProcessarRespostaAPI(response, config);
+    }
+    return false;
+}
+
+// Retorna true se houver posição aberta para o símbolo e MagicNumber
+bool has_open_position(ulong magic) {
+    for(int i = 0; i < PositionsTotal(); i++) {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket)) {
+            if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+               PositionGetInteger(POSITION_MAGIC) == magic) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Retorna true se houver ordem pendente para o símbolo e MagicNumber
+bool has_open_order(ulong magic) {
+    for(int i = 0; i < OrdersTotal(); i++) {
+        ulong ticket = OrderGetTicket(i);
+        if(OrderSelect(ticket)) {
+            if(OrderGetString(ORDER_SYMBOL) == _Symbol &&
+               OrderGetInteger(ORDER_MAGIC) == magic &&
+               (OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_LIMIT ||
+                OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_SELL_LIMIT ||
+                OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_STOP ||
+                OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_SELL_STOP)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
