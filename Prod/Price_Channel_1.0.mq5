@@ -87,27 +87,9 @@ input int      EspessuraLinha                 = 1;      // Espessura das linhas
 input ENUM_LINE_STYLE EstiloLinha             = STYLE_SOLID;  // Estilo das linhas
 input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
 
-// Parâmetros de Gerenciamento de Posição
-input group "=== Gerenciamento de Posição ==="
-input ENUM_SIM_NAO GerenciarPosicoesAtivado   = sim; // Ativar Gerenciamento de Posição
-input int      PontosParaFechamentoParcial    = 50;  // Pontos para fechamento parcial
-input double   PercentualFechamentoParcial    = 20.0; // Percentual a fechar por etapa
-input int      NumeroMaximoFechamentosParciais= 5; // Número máximo de fechamentos parciais
-
-// Parâmetros de Trailing Stop
-input group "=== Trailing Stop ==="
-input ENUM_SIM_NAO AtivarTrailingStop            = sim;   // Ativar Trailing Stop
-input double   PercentualLucroParaAtivarTrailing = 50.0; // Percentual de lucro para ativar trailing stop
-input int      NumeroMaximoFechamentoAtivaTP     = 4; // Número máximo de fechamentos parciais
-
-
-input group "=== ATR Settings === "
-input int                   iATRPeriod            = 14;                   // ATR Period
-input ENUM_TIMEFRAMES       iATRTimeFrame         = PERIOD_M5;           // ATR Timeframe
-
 
 input group "=== Risk Management ==="
-input ENUM_SIM_NAO riskManagement            = nao;   // Ativar Risk Management
+input ENUM_SIM_NAO riskManagement            = sim;   // Ativar Risk Management
 input int    iDailyTarget                    = 10000;    // Meta de ganho 
 input int    iLossTarget                     = 500;     // Loss máximo 
 input double iDDTrigger                      = 300;     // Valor para ativar o drawdown
@@ -127,15 +109,6 @@ CTrade trade;
 bool posicaoAberta = false;
 ulong posicaoTicket = 0;
 
-// Variáveis globais de trailing
-bool primeiroAlvoAtingido = false;
-double nivelTrailingStop = 0;
-double takeProfitFinal = 0;
-bool trailingStopAtivado = false; // Flag para controlar se o trailing stop está ativo
-double stopLossAtual = 0; // Armazena o stop loss atual da posição
-
-double dataATR[];
-int handleAtr;
 
 bool vTPTrigger = false;
 bool vTargetLock = false;
@@ -156,14 +129,12 @@ ulong MagicNumber = 0.0;
 
 MyMagicNumber myMagicNumber;
 
-// Variáveis de gerenciamento de posição
-int fechoParcialContador = 0;
-double volumeOriginal = 0;
-
 // Variáveis globais de estatísticas
 int qtdOperacoes = 0;
 int qtdGain = 0;
 int qtdLoss = 0;
+
+
 
 //+------------------------------------------------------------------+
 //| Estrutura para armazenar configurações de nível                    |
@@ -291,18 +262,6 @@ int OnInit(){
     
     LogMsg("Tamanho do tick do ativo " + _Symbol + ": " + DoubleToString(tickSize, _Digits), LOG_LEVEL_INFO);
     
-    handleAtr = iATR(_Symbol, iATRTimeFrame, iATRPeriod);
-    
-    if (handleAtr==INVALID_HANDLE){
-        LogMsg("FAILED TO CREATE HANDLE OF THE iATR INDICATOR. REVERTING NOW", LOG_LEVEL_ERROR);
-        return INIT_FAILED;
-    }
-   
-    // Configurar array de rates
-    ArraySetAsSeries(rates, true);
-    ArraySetAsSeries(dataATR,true);
-    vMaxProfit = 0;
-    
     // Limpar objetos antigos
     LimparObjetos();
     
@@ -346,25 +305,13 @@ int OnInit(){
 //+------------------------------------------------------------------+
 //| Expert deinitialization function                                   |
 //+------------------------------------------------------------------+
-void OnDeinit(const int reason)
-{
-    // Fechar posições abertas se houver
-    if(HasPosition(MagicNumber)>0)
-    {
-        trade.PositionClose(posicaoTicket);
-        LogMsg("Posição fechada na finalização do EA", LOG_LEVEL_INFO);
-    }
-    
-    // Resetar variáveis de trailing stop
-    trailingStopAtivado = false;
-    stopLossAtual = 0;
-    
-     if (handleAtr!= INVALID_HANDLE)
-        IndicatorRelease(handleAtr);
+void OnDeinit(const int reason){
     
     // Limpar todos os objetos, incluindo triggers
     ObjectsDeleteAll(0, prefixoObjeto);
     ChartRedraw(0);
+    
+    ArrayFree(rates);
     LogMsg("EA finalizado. Motivo: " + IntegerToString(reason), LOG_LEVEL_INFO);
 }
 
@@ -372,11 +319,8 @@ void OnDeinit(const int reason)
 //| Expert tick function                                              |
 //+------------------------------------------------------------------+
 void OnTick(){
-    
-    int open_positions = HasPosition(MagicNumber);
-    int open_orders    = OpenOrdersCount(MagicNumber);
-    
-    if (!i24h && !allowed_by_hour(iHoraIni, iHoraFim)) {
+   
+   if (!i24h && !allowed_by_hour(iHoraIni, iHoraFim)) {
         closeAllPositions(trade, MagicNumber);
         closeAllOpenOrders(trade, MagicNumber);        
         LiberarLockMeta();
@@ -386,16 +330,28 @@ void OnTick(){
         //PrintEstatisticasRobo();
         return;
     }
-    
-    // Gerenciar posições abertas
-    if(GerenciarPosicoesAtivado == sim){
-        GerenciarPosicoesAbertas();
+
+
+    // Obter dados do último candle
+    if(CopyRates(_Symbol, Periodo, 0, 3, rates) <= 0)
+    {
+        LogMsg("ERRO: Falha ao copiar dados do último candle", LOG_LEVEL_ERROR);
+        return;
+    }
+    ArraySetAsSeries(rates, true);
+
+   
+
+    int nivelIndex = (int)NivelAtivo - 1;
+    if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)){
+        double linhasPreco[];
+        CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
+        AtualizarLinhasNivel(linhasPreco, niveis[nivelIndex]);
+        VerificarGatilhos(linhasPreco);
+        ChartRedraw(0);
     }
     
-    // Gerencia o trailing stop para posições abertas
-    if(AtivarTrailingStop == sim){
-      GerenciarTrailingStop();
-    }
+    
     
     if(AtivarInterval == sim){
       if(EstaNoHorarioDePausa(iHoraInterval1,iHoraInterval2)){
@@ -410,31 +366,6 @@ void OnTick(){
     if (riskManagement == sim){
          GerenciarRisk();
      }   
-       
-    // Obter dados do último candle
-    if(CopyRates(_Symbol, Periodo, 0, 3, rates) <= 0)
-    {
-        LogMsg("ERRO: Falha ao copiar dados do último candle", LOG_LEVEL_ERROR);
-        return;
-    }
-    
-    ArraySetAsSeries(rates, true);
-    
-    
-    // Verificar apenas o nível selecionado
-    int nivelIndex = (int)NivelAtivo - 1;
-    if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)){
-        double linhasPreco[];
-        CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
-        AtualizarLinhasNivel(linhasPreco, niveis[nivelIndex]);
-        
-        // Verificar gatilhos
-        VerificarGatilhos(linhasPreco);
-        ChartRedraw(0);
-    }
-    
-    
-    
 }
 
 void GerenciarRisk(){
@@ -673,52 +604,16 @@ double NormalizarPreco(double preco)
     return NormalizeDouble(MathRound(preco / tickSize) * tickSize, _Digits);
 }
 
-//+------------------------------------------------------------------+
-//| Calcula o Average True Range (ATR)                                |
-//+------------------------------------------------------------------+
-double refreshATR( ){
-    
-    if (CopyBuffer(handleAtr, 0, 0, 3, dataATR) < 3) {
-      LogMsg(StringFormat("ERROR:copying ATR buffer for ", _Symbol), LOG_LEVEL_ERROR);
-      return 0;
-   }
-   ArraySetAsSeries(dataATR, true);
-    
-   return dataATR[0];
-}
-//+------------------------------------------------------------------+
-//| Cacula stop loss                                                 |
-//+------------------------------------------------------------------+
-double calculaStopLoss(string tipo, int indice, double &linhas[]){
-    double price_step = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
-    double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
-    double stop = 0.0;
-    
-    if (tipo == "compra" ){
-        double precoEntrada = rateGatilho.close;
-        stop = roundPriceH9K(precoEntrada + (tamanhoCandle * 1.75), price_step);
-        LogMsg("DEBUG: Compra (INVERTIDO) - entrada: " + DoubleToString(precoEntrada, _Digits) + 
-               " stop: " + DoubleToString(stop, _Digits) + 
-               " diferença: " + DoubleToString(stop - precoEntrada, _Digits), LOG_LEVEL_DEBUG);
-    } else if (tipo == "venda" ){
-        double precoEntrada = rateGatilho.open;
-        stop = roundPriceH9K(precoEntrada - (tamanhoCandle * 1.75), price_step);
-        LogMsg("DEBUG: Venda (INVERTIDO) - entrada: " + DoubleToString(precoEntrada, _Digits) + 
-               " stop: " + DoubleToString(stop, _Digits) + 
-               " diferença: " + DoubleToString(precoEntrada - stop, _Digits), LOG_LEVEL_DEBUG);
-    }
-    
-    LogMsg("DEBUG: Stop loss calculado para " + tipo + " - entrada: " + DoubleToString((tipo == "compra") ? rateGatilho.close : rateGatilho.open, _Digits) + " stop: " + DoubleToString(stop, _Digits), LOG_LEVEL_DEBUG);
-    return stop;
-}
+
 
 //+------------------------------------------------------------------+
 //| Verifica gatilhos nos preços de abertura e fechamento             |
 //+-------------------------------------------high-------------------+
 void VerificarGatilhos(double &linhas[]){
-
-    
-
+    if(ArraySize(rates) < 2) {
+        LogMsg("ERRO: Array rates não possui candles suficientes!", LOG_LEVEL_ERROR);
+        return;
+    }
     // Verificar se o candle atravessa alguma linha
     for(int i = 0; i < ArraySize(linhas); i++)
     {
@@ -743,6 +638,10 @@ void VerificarGatilhos(double &linhas[]){
 //| Verifica e executa entradas                                        |
 //+------------------------------------------------------------------+
 void VerificarEntradas(double &linhas[], int indice_linha){
+    if(indice_linha < 0 || indice_linha >= ArraySize(linhas)) {
+        LogMsg("ERRO: indice_linha fora do range do array de linhas!", LOG_LEVEL_ERROR);
+        return;
+    }
     // Bloqueio por locks de risco
     if (vTargetLockMeta || vTargetLockLoss || vTargetLockDrawdown) {
         LogMsg("ENTRADA BLOQUEADA: Algum lock de risco está ativo (Meta, Loss ou Drawdown)", LOG_LEVEL_INFO);
@@ -768,7 +667,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
             double precoEntrada = rateGatilho.close;
             double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
             double stop_calc = precoEntrada - (tamanhoCandle * 0.75);
-            double minDist = MathMax(stopLevel, tickSize * 4);
+            double minDist = MathMax(stopLevel, tickSize * 2);
             double stop_loss = MathMin(roundPriceH9K(stop_calc, tickSize), precoEntrada - tickSize);
             if (stop_loss >= precoEntrada) stop_loss = precoEntrada - tickSize;
             if ((precoEntrada - stop_loss) < minDist)
@@ -787,6 +686,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
                 LogMsg("DEBUG: Executando COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
                        " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
                 ExecutarCompra(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize));
+                
             } else {
                 LogMsg("ERRO: Preços inválidos para COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
                        " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits) +
@@ -807,7 +707,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
             double precoEntrada = rateGatilho.open;
             double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
             double stop_calc = precoEntrada + (tamanhoCandle * 0.75);
-            double minDist = MathMax(stopLevel, tickSize * 4);
+            double minDist = MathMax(stopLevel, tickSize * 2);
             double stop_loss = MathMax(roundPriceH9K(stop_calc, tickSize), precoEntrada + tickSize);
             if (stop_loss <= precoEntrada) stop_loss = precoEntrada + tickSize;
             if ((stop_loss - precoEntrada) < minDist)
@@ -826,6 +726,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
                 LogMsg("DEBUG: Executando VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
                        " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
                 ExecutarVenda(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize));
+                
             } else {
                 LogMsg("ERRO: Preços inválidos para VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
                        " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits) +
@@ -840,22 +741,12 @@ void VerificarEntradas(double &linhas[], int indice_linha){
 //+------------------------------------------------------------------+
 bool ExecutarCompra(double preco_entrada, double stop_loss, double take_profit)
 {
-  
-    // Primeiro faz a ordem com volume dobrado e sem take profit
-    if(trade.Buy(Volume , _Symbol,preco_entrada,  stop_loss, take_profit,MQLInfoString(MQL_PROGRAM_NAME)+ " : " +_Symbol)){
-       
-        posicaoAberta = true;
-        posicaoTicket = trade.ResultOrder();
-        volumeOriginal = Volume;
-        fechoParcialContador = 0;
-        takeProfitFinal = take_profit; // Armazena o take profit final
-        stopLossAtual = stop_loss; // Armazena o stop loss inicial
-        
-        LogMsg("INFO: Ordem de COMPRA executada - Volume: " + DoubleToString(Volume , 2) + 
-                 " Sl: " + DoubleToString(stop_loss, _Digits)+
-                  " TP: " + DoubleToString(take_profit, _Digits) , LOG_LEVEL_INFO); 
-       return true;
-        
+    // Abre a ordem principal de compra
+    if(trade.Buy(Volume, _Symbol, preco_entrada, stop_loss, take_profit, MQLInfoString(MQL_PROGRAM_NAME) + " : " + _Symbol)){
+        LogMsg("INFO: Ordem de COMPRA executada - Volume: " + DoubleToString(Volume, 2) +
+               " SL: " + DoubleToString(stop_loss, _Digits) +
+               " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
+        return true;
     }
     LogMsg("ERRO ao executar ordem de COMPRA: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
     return false;
@@ -864,24 +755,15 @@ bool ExecutarCompra(double preco_entrada, double stop_loss, double take_profit)
 //+------------------------------------------------------------------+
 //| Executa ordem de venda                                            |
 //+------------------------------------------------------------------+
-bool ExecutarVenda(double preco_entrada, double stop_loss, double take_profit)
-{
-    // Primeiro faz a ordem com volume dobrado e sem take profit
-    if(trade.Sell(Volume ,  _Symbol, preco_entrada ,stop_loss,take_profit,MQLInfoString(MQL_PROGRAM_NAME)+ " : " +_Symbol)){
-        posicaoAberta = true;
-        posicaoTicket = trade.ResultOrder();
-        volumeOriginal = Volume;
-        fechoParcialContador = 0;
-        takeProfitFinal = take_profit; // Armazena o take profit final
-        stopLossAtual = stop_loss; // Armazena o stop loss inicial
+bool ExecutarVenda(double preco_entrada, double stop_loss, double take_profit){
+    // Abre a ordem principal de venda
+    if(trade.Sell(Volume, _Symbol, preco_entrada, stop_loss, take_profit, MQLInfoString(MQL_PROGRAM_NAME) + " : " + _Symbol)){
         
-        LogMsg("INFO: Ordem de VENDA executada - Volume: " + DoubleToString(Volume , 2) + 
-                   " SL: " + DoubleToString(stop_loss, _Digits)+
-                   " TP: " + DoubleToString(take_profit, _Digits) , LOG_LEVEL_INFO);  
-                           
-       return true;
+        LogMsg("INFO: Ordem de VENDA executada - Volume: " + DoubleToString(Volume, 2) +
+               " SL: " + DoubleToString(stop_loss, _Digits) +
+               " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
+        return true;
     }
-    
     LogMsg("ERRO: Error ao executar ordem de VENDA: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
     return false;
 }
@@ -912,188 +794,6 @@ double EncontrarProximoNivelInferior(double &linhas[], int indice_atual, double 
     return 0;
 }
 
-//+------------------------------------------------------------------+
-//| Gerencia posições abertas e fechamentos parciais                  |
-//+------------------------------------------------------------------+
-void GerenciarPosicoesAbertas()
-{
-    for(int i = 0; i < PositionsTotal(); i++)
-    {
-        ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket))
-        {
-            if(PositionGetInteger(POSITION_MAGIC) == MagicNumber && PositionGetString(POSITION_SYMBOL) == _Symbol)
-            {
-                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-                double currentPrice = 0;
-                ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-                double currentVolume = PositionGetDouble(POSITION_VOLUME);
-                
-                if(type == POSITION_TYPE_BUY)
-                {
-                    currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID); // Use BID for buy positions
-                }
-                else if(type == POSITION_TYPE_SELL)
-                {
-                    currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK); // Use ASK for sell positions
-                }
-                
-                double profitPoints = 0;
-                if(type == POSITION_TYPE_BUY)
-                {
-                    profitPoints = (currentPrice - openPrice) / _Point;
-                }
-                else if(type == POSITION_TYPE_SELL)
-                {
-                    profitPoints = (openPrice - currentPrice) / _Point;
-                }
-                
-                // Check for partial close
-                if(profitPoints >= (fechoParcialContador + 1) * PontosParaFechamentoParcial)
-                {
-                    if(fechoParcialContador < NumeroMaximoFechamentosParciais)
-                    {
-                        double volumeToClose = currentVolume * (PercentualFechamentoParcial / 100.0);
-                        LogMsg("DEBUG: Initial volumeToClose: " + DoubleToString(volumeToClose, 8) + ", currentVolume: " + 
-                         DoubleToString(currentVolume, 8) + ", PercentualFechamentoParcial: " + 
-                         DoubleToString(PercentualFechamentoParcial, 2), LOG_LEVEL_DEBUG);
-
-                        // Normalize volume to ensure it's valid
-                        volumeToClose = NormalizeDouble(volumeToClose, 2); // Assuming 2 decimal places for volume
-                        LogMsg("DEBUG: volumeToClose after NormalizeDouble: " + DoubleToString(volumeToClose, 8), LOG_LEVEL_DEBUG);
-                        
-                        // Ensure volume is at least minimum allowed volume and a multiple of step
-                        double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-                        double volumeStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-                        LogMsg("DEBUG: minVolume: " + DoubleToString(minVolume, 8) + ", volumeStep: " + DoubleToString(volumeStep, 8), LOG_LEVEL_DEBUG);
-                        
-                        if(volumeToClose < minVolume)
-                        {
-                            volumeToClose = minVolume;
-                            LogMsg("DEBUG: volumeToClose adjusted to minVolume: " + DoubleToString(volumeToClose, 8), LOG_LEVEL_DEBUG);
-                        }
-                        
-                        // Adjust volume to be a multiple of volumeStep
-                        volumeToClose = MathRound(volumeToClose / volumeStep) * volumeStep;
-                        LogMsg("DEBUG: volumeToClose after adjusting for volumeStep: " + DoubleToString(volumeToClose, 8), LOG_LEVEL_DEBUG);
-
-                        // Ensure calculated volume does not exceed current position volume
-                        if (volumeToClose > currentVolume) {
-                            volumeToClose = currentVolume;
-                            LogMsg("DEBUG: volumeToClose adjusted to not exceed currentVolume: " + DoubleToString(volumeToClose, 8), LOG_LEVEL_DEBUG);
-                        }
-
-                        if(trade.PositionClosePartial(ticket, volumeToClose))
-                        {
-                            fechoParcialContador++;
-                            LogMsg("INFO: Fechamento parcial: " + DoubleToString(volumeToClose, 2) + " a " + DoubleToString(currentPrice, _Digits) + ". Etapa: " + IntegerToString(fechoParcialContador), LOG_LEVEL_INFO);
-                        }
-                        else
-                        {
-                            LogMsg("ERRO: Falha ao fechar parcial da posição " + IntegerToString(ticket) + ": " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Gerencia o trailing stop para posições abertas                    |
-//+------------------------------------------------------------------+
-void GerenciarTrailingStop()
-{
-     if (!HasPosition(MagicNumber)>0)
-        return;
-
-    for(int i = 0; i < PositionsTotal(); i++)
-    {
-        ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket))
-        {
-            if(PositionGetInteger(POSITION_MAGIC) == MagicNumber && PositionGetString(POSITION_SYMBOL) == _Symbol)
-            {
-                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-                double currentPrice = 0;
-                ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-                double currentSL = PositionGetDouble(POSITION_SL); // Current Stop Loss of the position
-
-                if(type == POSITION_TYPE_BUY)
-                {
-                    currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-                }
-                else if(type == POSITION_TYPE_SELL)
-                {
-                    currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-                }
-
-                double profitPoints = 0;
-                if(type == POSITION_TYPE_BUY)
-                {
-                    profitPoints = (currentPrice - openPrice) / _Point;
-                }
-                else if(type == POSITION_TYPE_SELL)
-                {
-                    profitPoints = (openPrice - currentPrice) / _Point;
-                }
-                
-                double profitPercentage = (profitPoints * _Point / openPrice) * 100;
-               
-
-                // Activation conditions
-                if(!trailingStopAtivado &&((fechoParcialContador >= NumeroMaximoFechamentoAtivaTP || profitPercentage >= PercentualLucroParaAtivarTrailing)))
-                {
-                    trailingStopAtivado = true;
-                    LogMsg("Trailing Stop Ativado! Profit Percentage: " + DoubleToString(profitPercentage, 2) + "%, Partial closes: " + IntegerToString(fechoParcialContador), LOG_LEVEL_INFO);
-                }
-
-                // Trailing logic
-                if(trailingStopAtivado)
-                {
-                  
-                    double atr = refreshATR(); // ATR of the previous candle
-                    
-                    if(atr == 0) return; // Error in ATR calculation
-
-                    double newSL = 0;
-                    if(type == POSITION_TYPE_BUY)
-                    {
-                        newSL = NormalizarPreco(currentPrice - atr);
-                        if(newSL > stopLossAtual) // Only move SL up for BUY
-                        {
-                            stopLossAtual = NormalizarPreco(newSL);
-                            if(trade.PositionModify(ticket, stopLossAtual, takeProfitFinal))
-                            {
-                                LogMsg("Trailing Stop BUY ajustado para: " + DoubleToString(stopLossAtual, _Digits), LOG_LEVEL_DEBUG);
-                            }
-                            else
-                            {
-                                LogMsg("ERRO: Falha ao ajustar Trailing Stop BUY: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
-                            }
-                        }
-                    }
-                    else if(type == POSITION_TYPE_SELL)
-                    {
-                        newSL = NormalizarPreco(currentPrice + atr);
-                        if(newSL < stopLossAtual) // Only move SL down for SELL
-                        {
-                            stopLossAtual = NormalizarPreco(newSL);
-                            if(trade.PositionModify(ticket, stopLossAtual, takeProfitFinal))
-                            {
-                                LogMsg("Trailing Stop SELL ajustado para: " + DoubleToString(stopLossAtual, _Digits), LOG_LEVEL_DEBUG);
-                            }
-                            else
-                            {
-                                LogMsg("ERRO: Falha ao ajustar Trailing Stop SELL: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 bool EstaNoHorarioDePausa(string horaInicio, string horaFim)
 {
     // Obter o horário atual
@@ -1342,7 +1042,7 @@ void AtualizarEstatisticasOperacoes() {
             if(HistoryDealGetInteger(ticket, DEAL_MAGIC) == MagicNumber && HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol) {
                 datetime closeTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
                 if(closeTime >= diaInicio) {
-                    int entryType = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+                    long entryType = HistoryDealGetInteger(ticket, DEAL_ENTRY);
                     if(entryType == DEAL_ENTRY_OUT || entryType == DEAL_ENTRY_INOUT) { // saída de posição
                         qtdOperacoes++;
                         profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
@@ -1374,7 +1074,6 @@ void PrintEstatisticasRobo() {
     LogMsg("Lucro máximo do dia: " + DoubleToString(vMaxProfit, 2), LOG_LEVEL_INFO);
     LogMsg("Posições abertas: " + IntegerToString(numPosicoes), LOG_LEVEL_INFO);
     LogMsg("Ordens pendentes: " + IntegerToString(numOrdens), LOG_LEVEL_INFO);
-    LogMsg("Fechamentos parciais: " + IntegerToString(fechoParcialContador), LOG_LEVEL_INFO);
     LogMsg("Qtd operações fechadas: " + IntegerToString(qtdOperacoes), LOG_LEVEL_INFO);
     LogMsg("Qtd GAIN: " + IntegerToString(qtdGain), LOG_LEVEL_INFO);
     LogMsg("Qtd LOSS: " + IntegerToString(qtdLoss), LOG_LEVEL_INFO);
