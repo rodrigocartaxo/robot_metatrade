@@ -664,7 +664,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
     LogMsg("DEBUG: TickSize do ativo: " + DoubleToString(tickSize, _Digits), LOG_LEVEL_DEBUG);
     
     // Compra: fechamento acima da linha -> EXECUTA COMPRA
-    if(rates[0].close > rateGatilho.close && rates[0].close > linhas[indice_linha] 
+    if(rates[0].close > linhas[indice_linha] 
        && rateGatilho.high < SymbolInfoDouble(_Symbol, SYMBOL_BID) ){
         // Permite apenas uma ordem aberta ou pendente por vez
         if (has_open_position(MagicNumber) || has_open_order(MagicNumber)) {
@@ -705,8 +705,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         }
     }
     // Venda: fechamento abaixo da linha -> EXECUTA VENDA
-    else if(rates[0].close < rateGatilho.open && 
-          rates[0].close < linhas[indice_linha] 
+    else if( rates[0].close < linhas[indice_linha] 
           && rateGatilho.low > SymbolInfoDouble(_Symbol, SYMBOL_ASK)  ){ 
         // Permite apenas uma ordem aberta ou pendente por vez
         if (has_open_position(MagicNumber) || has_open_order(MagicNumber)) {
