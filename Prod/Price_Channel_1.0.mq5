@@ -70,6 +70,7 @@ input string iHoraIni  = "09:05:00"; //Hora inicio
 input string iHoraFim  = "17:30:00"; //Hora fim
 input string iHoraInterval1                   = "12:00"; //Hora Inicio Pausa
 input string iHoraInterval2                   = "13:30"; //Hora Fim Pausa
+input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
 
 // Parâmetros gerais
 input group "=== Configurações Gerais ==="
@@ -80,12 +81,13 @@ input ENUM_SIM_NAO MostrarLogs                = sim;      // Mostrar logs detalh
 input LOG_LEVEL LogLevel                      = LOG_LEVEL_INFO; // Nível de log exibido
 input ENUM_SIM_NAO AtivarInterval             = sim;      // Ativar Hora de pausa 
 input int numeroLinhas                        =  25 ; //Numero de canais
+input int percentualStopLoss                  =  75 ; //Percentual stop loss ref. Canal
 
 
 input group "=== Configurações Canais ==="
 input int      EspessuraLinha                 = 1;      // Espessura das linhas
 input ENUM_LINE_STYLE EstiloLinha             = STYLE_SOLID;  // Estilo das linhas
-input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
+
 
 
 input group "=== Risk Management ==="
@@ -101,8 +103,11 @@ double ultimoPreco,vMaxProfit;
 string prefixoObjeto = "PriceChannel_";
 double tickSize; // Tamanho do tick do ativo
 double incrementoTickCurrent = 0;
+
 MqlRates rates[];
 MqlRates rateGatilho;
+
+double linhasPreco[];
 
 // Variáveis globais de trading
 CTrade trade;
@@ -164,9 +169,11 @@ NivelCanal niveis[];
 //+------------------------------------------------------------------+
 void LogMsg(string mensagem, LOG_LEVEL nivel)
 {
-    if(MostrarLogs == sim && nivel <= LogLevel)
-    {
-        Print(mensagem);
+    if(MostrarLogs == sim && nivel <= LogLevel){
+        if (LOG_LEVEL_INFO){
+          if (isNewBar(PERIOD_M15)){Print(mensagem);}
+        }
+        
     }
 }
 
@@ -344,11 +351,14 @@ void OnTick(){
 
     int nivelIndex = (int)NivelAtivo - 1;
     if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)){
-        double linhasPreco[];
-        CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
-        AtualizarLinhasNivel(linhasPreco, niveis[nivelIndex]);
+        
+        if (isNewBar(Periodo)){
+           CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
+           AtualizarLinhasNivel(niveis[nivelIndex]);
+           ChartRedraw(0);
+        }
         VerificarGatilhos(linhasPreco);
-        ChartRedraw(0);
+        
     }
     
     
@@ -461,7 +471,7 @@ void CalcularLinhasPreco(double &linhas[], NivelCanal &nivel)
 //+------------------------------------------------------------------+
 void CriarLinhasNivel(NivelCanal &nivel)
 {
-    double linhasPreco[];
+    
     CalcularLinhasPreco(linhasPreco, nivel);
     
     datetime tempo = TimeCurrent();
@@ -515,7 +525,7 @@ void CriarLinhasNivel(NivelCanal &nivel)
 //+------------------------------------------------------------------+
 //| Atualiza as linhas de um nível específico                         |
 //+------------------------------------------------------------------+
-void AtualizarLinhasNivel(double &linhasPreco[], NivelCanal &nivel)
+void AtualizarLinhasNivel(NivelCanal &nivel)
 {
     datetime tempo = TimeCurrent();
     double pontoPip = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -654,8 +664,8 @@ void VerificarEntradas(double &linhas[], int indice_linha){
     LogMsg("DEBUG: TickSize do ativo: " + DoubleToString(tickSize, _Digits), LOG_LEVEL_DEBUG);
     
     // Compra: fechamento acima da linha -> EXECUTA COMPRA
-    if(rates[0].close > rateGatilho.close && rates[0].close > linhas[indice_linha])
-    {
+    if(rates[0].close > rateGatilho.close && rates[0].close > linhas[indice_linha] 
+       && rateGatilho.high < SymbolInfoDouble(_Symbol, SYMBOL_BID) ){
         // Permite apenas uma ordem aberta ou pendente por vez
         if (has_open_position(MagicNumber) || has_open_order(MagicNumber)) {
             LogMsg("INFO: Já existe uma posição ou ordem pendente aberta. Não será aberta nova ordem de COMPRA.", LOG_LEVEL_INFO);
@@ -665,8 +675,8 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         if(takeProfit > 0)
         {
             double precoEntrada = rateGatilho.close;
-            double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
-            double stop_calc = precoEntrada - (tamanhoCandle * 0.75);
+            //double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
+            double stop_calc = linhas[indice_linha] - (incrementoTickCurrent * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
             double stop_loss = MathMin(roundPriceH9K(stop_calc, tickSize), precoEntrada - tickSize);
             if (stop_loss >= precoEntrada) stop_loss = precoEntrada - tickSize;
@@ -695,7 +705,9 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         }
     }
     // Venda: fechamento abaixo da linha -> EXECUTA VENDA
-    else if(rates[0].close < rateGatilho.open && rates[0].close < linhas[indice_linha]){ 
+    else if(rates[0].close < rateGatilho.open && 
+          rates[0].close < linhas[indice_linha] 
+          && rateGatilho.low > SymbolInfoDouble(_Symbol, SYMBOL_ASK)  ){ 
         // Permite apenas uma ordem aberta ou pendente por vez
         if (has_open_position(MagicNumber) || has_open_order(MagicNumber)) {
             LogMsg("INFO: Já existe uma posição ou ordem pendente aberta. Não será aberta nova ordem de VENDA.", LOG_LEVEL_INFO);
@@ -705,8 +717,8 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         if(takeProfit > 0)
         {
             double precoEntrada = rateGatilho.open;
-            double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
-            double stop_calc = precoEntrada + (tamanhoCandle * 0.75);
+            //double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
+            double stop_calc = linhas[indice_linha] + (incrementoTickCurrent * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
             double stop_loss = MathMax(roundPriceH9K(stop_calc, tickSize), precoEntrada + tickSize);
             if (stop_loss <= precoEntrada) stop_loss = precoEntrada + tickSize;
