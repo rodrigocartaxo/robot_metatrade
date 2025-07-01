@@ -68,9 +68,10 @@ input group "Daytrade Window"
 input ENUM_SIM_NAO i24h = nao; //Liga o modo 24h (forex)
 input string iHoraIni  = "09:05:00"; //Hora inicio
 input string iHoraFim  = "17:30:00"; //Hora fim
+input ENUM_SIM_NAO AtivarInterval             = sim;      // Ativar Hora de pausa 
 input string iHoraInterval1                   = "12:00"; //Hora Inicio Pausa
 input string iHoraInterval2                   = "13:30"; //Hora Fim Pausa
-input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
+
 
 // Parâmetros gerais
 input group "=== Configurações Gerais ==="
@@ -79,7 +80,7 @@ input ENUM_CHANNEL_LEVEL NivelAtivo           = NIVEL_1;  // Nível do Canal a E
 input double   Volume                         = 10;       // Alavacagem Lotes
 input ENUM_SIM_NAO MostrarLogs                = sim;      // Mostrar logs detalhados
 input LOG_LEVEL LogLevel                      = LOG_LEVEL_INFO; // Nível de log exibido
-input ENUM_SIM_NAO AtivarInterval             = sim;      // Ativar Hora de pausa 
+input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
 input int numeroLinhas                        =  25 ; //Numero de canais
 input int percentualStopLoss                  =  75 ; //Percentual stop loss ref. Canal
 
@@ -346,7 +347,20 @@ void OnTick(){
         return;
     }
     ArraySetAsSeries(rates, true);
-
+   
+   if(AtivarInterval == sim){
+      if(EstaNoHorarioDePausa(iHoraInterval1,iHoraInterval2)){
+         if (isNewBar(Periodo)) {
+            LogMsg("INFO: Hora de intervalo ativada ", LOG_LEVEL_INFO);
+            PrintEstatisticasRobo();
+         }
+         return;
+      }  
+    }
+    
+    if (riskManagement == sim){
+         GerenciarRisk();
+     }   
    
 
     int nivelIndex = (int)NivelAtivo - 1;
@@ -363,19 +377,7 @@ void OnTick(){
     
     
     
-    if(AtivarInterval == sim){
-      if(EstaNoHorarioDePausa(iHoraInterval1,iHoraInterval2)){
-         if (isNewBar(Periodo)) {
-            LogMsg("INFO: Hora de intervalo ativada ", LOG_LEVEL_INFO);
-            PrintEstatisticasRobo();
-         }
-         return;
-      }  
-    }
     
-    if (riskManagement == sim){
-         GerenciarRisk();
-     }   
 }
 
 void GerenciarRisk(){
