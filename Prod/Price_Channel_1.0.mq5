@@ -55,6 +55,10 @@ enum ENUM_SIM_NAO
     nao,  // Off
     sim   // On
 };
+enum ENUM_ORIGIN{
+    OTHON,  // External
+    VIANA   // Internal
+};
 
 // Enum para níveis de log
 enum LOG_LEVEL {
@@ -83,6 +87,7 @@ input LOG_LEVEL LogLevel                      = LOG_LEVEL_INFO; // Nível de log
 input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
 input int numeroLinhas                        =  25 ; //Numero de canais
 input int percentualStopLoss                  =  75 ; //Percentual stop loss ref. Canal
+input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas 
 
 
 input group "=== Configurações Canais ==="
@@ -140,6 +145,8 @@ int qtdOperacoes = 0;
 int qtdGain = 0;
 int qtdLoss = 0;
 
+datetime ultimoCandleEntrada = 0; // Trava para apenas uma entrada por candle de gatilho
+datetime ultimoDiaConfig = 0; // Novo: controle do último dia de configuração
 
 
 //+------------------------------------------------------------------+
@@ -164,18 +171,22 @@ struct ConfiguracaoCanal {
 };
 
 NivelCanal niveis[];
+ConfiguracaoCanal configGeral;     // Torna global para uso em OnTick
 
 //+------------------------------------------------------------------+
 //| Função para log com nível                                        |
 //+------------------------------------------------------------------+
 void LogMsg(string mensagem, LOG_LEVEL nivel)
 {
-    if(MostrarLogs == sim && nivel <= LogLevel){
-        if (LOG_LEVEL_INFO){
-          if (isNewBar(PERIOD_M15)){Print(mensagem);}
-        }
-        
+   if (MostrarLogs == sim && nivel <= LogLevel) {
+    if (nivel == LOG_LEVEL_ERROR) {
+        Alert(mensagem);
+    } else if (nivel == LOG_LEVEL_INFO) {
+           Print(mensagem);
+    } else if (nivel == LOG_LEVEL_DEBUG) {
+        Print(mensagem);
     }
+}
 }
 
 //+------------------------------------------------------------------+
@@ -210,28 +221,30 @@ int OnInit(){
         return INIT_FAILED;
     }
     
-    MagicNumber = CalcularMagicNumber(MQLInfoString(MQL_PROGRAM_NAME), _Symbol); 
+    MagicNumber = CalcularMagicNumber(MQLInfoString(MQL_PROGRAM_NAME)+EnumToString(orginSelect), _Symbol); 
     
     // Configurar os níveis
     ArrayResize(niveis, 3);
     
     // Carregar configuração apenas do nível selecionado da API
-    ConfiguracaoCanal config;
     int nivelSelecionado = (int)NivelAtivo;
     
-    if(!CarregarConfiguracaoAPI(_Symbol, nivelSelecionado, config))
+    if(!CarregarConfiguracaoAPI(_Symbol, nivelSelecionado, configGeral))
     {
         LogMsg("ERRO: Falha ao carregar configuração do Nível " + IntegerToString(nivelSelecionado) + " da API", LOG_LEVEL_ERROR);
         return INIT_FAILED;
     }
     
+    // Salva o dia da configuração inicial
+    ultimoDiaConfig = iTime(_Symbol, PERIOD_D1, 0);
+    
     // Configurar apenas o nível selecionado
     int nivelIndex = nivelSelecionado - 1;
     if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis))
     {
-        niveis[nivelIndex].precoBase = config.marcoZero;
-        niveis[nivelIndex].incrementoTick = config.tamanhoCanal;
-        niveis[nivelIndex].nivel = config.nivel;
+        niveis[nivelIndex].precoBase = configGeral.marcoZero;
+        niveis[nivelIndex].incrementoTick = configGeral.tamanhoCanal;
+        niveis[nivelIndex].nivel = configGeral.nivel;
         
         // Definir cor baseada no nível
         switch(nivelSelecionado)
@@ -327,6 +340,27 @@ void OnDeinit(const int reason){
 //| Expert tick function                                              |
 //+------------------------------------------------------------------+
 void OnTick(){
+    // Novo: verifica se mudou o dia e recarrega config se necessário
+    datetime diaAtual = iTime(_Symbol, PERIOD_D1, 0);
+    int nivelSelecionado = (int)NivelAtivo;
+    int nivelIndex = nivelSelecionado - 1;
+    if (diaAtual != ultimoDiaConfig) {
+        if(CarregarConfiguracaoAPI(_Symbol, nivelSelecionado, configGeral)) {
+            if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)) {
+                niveis[nivelIndex].precoBase = configGeral.marcoZero;
+                niveis[nivelIndex].incrementoTick = configGeral.tamanhoCanal;
+                niveis[nivelIndex].nivel = configGeral.nivel;
+                incrementoTickCurrent = niveis[nivelIndex].incrementoTick;
+                LimparObjetos();
+                CriarLinhasNivel(niveis[nivelIndex]);
+                ChartRedraw(0);
+                LogMsg("Configuração do canal recarregada para o novo dia.", LOG_LEVEL_INFO);
+            }
+            ultimoDiaConfig = diaAtual;
+        } else {
+            LogMsg("ERRO: Falha ao recarregar configuração da API no novo dia.", LOG_LEVEL_ERROR);
+        }
+    }
    
    if (!i24h && !allowed_by_hour(iHoraIni, iHoraFim)) {
         closeAllPositions(trade, MagicNumber);
@@ -363,7 +397,6 @@ void OnTick(){
      }   
    
 
-    int nivelIndex = (int)NivelAtivo - 1;
     if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)){
         
         if (isNewBar(Periodo)){
@@ -654,6 +687,11 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         LogMsg("ERRO: indice_linha fora do range do array de linhas!", LOG_LEVEL_ERROR);
         return;
     }
+    // Trava: só permite uma entrada por candle de gatilho
+    if (ultimoCandleEntrada == rateGatilho.time) {
+        LogMsg("Já houve entrada neste candle de gatilho, ignorando novo gatilho.", LOG_LEVEL_INFO);
+        return;
+    }
     // Bloqueio por locks de risco
     if (vTargetLockMeta || vTargetLockLoss || vTargetLockDrawdown) {
         LogMsg("ENTRADA BLOQUEADA: Algum lock de risco está ativo (Meta, Loss ou Drawdown)", LOG_LEVEL_INFO);
@@ -697,7 +735,9 @@ void VerificarEntradas(double &linhas[], int indice_linha){
                (precoEntrada - stop_loss > stopLevel) && (takeProfit - precoEntrada > stopLevel)) {
                 LogMsg("DEBUG: Executando COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
                        " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
-                ExecutarCompra(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize));
+                if (ExecutarCompra(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize))) {
+                    ultimoCandleEntrada = rateGatilho.time;
+                }
                 
             } else {
                 LogMsg("ERRO: Preços inválidos para COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
@@ -738,7 +778,9 @@ void VerificarEntradas(double &linhas[], int indice_linha){
                (stop_loss - precoEntrada > stopLevel) && (precoEntrada - takeProfit > stopLevel)) {
                 LogMsg("DEBUG: Executando VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
                        " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
-                ExecutarVenda(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize));
+                if (ExecutarVenda(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize))) {
+                    ultimoCandleEntrada = rateGatilho.time;
+                }
                 
             } else {
                 LogMsg("ERRO: Preços inválidos para VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
@@ -859,7 +901,7 @@ int ConverterHorarioParaMinutos(string horario)
 //+------------------------------------------------------------------+
 string FazerChamadaHTTP(string symbol, int nivel)
 {
-    string url = "http://127.0.0.1:8080/api/fonte-dados/" + symbol + "/" + IntegerToString(nivel);
+    string url = "http://127.0.0.1:8080/api/fonte-dados/" + symbol + "/" + IntegerToString(nivel)+"/" + EnumToString(orginSelect);
     
     LogMsg("DEBUG: Fazendo chamada HTTP para: " + url, LOG_LEVEL_DEBUG);
     
@@ -1098,4 +1140,49 @@ void PrintEstatisticasRobo() {
 // Função pública para chamada manual
 void PrintEstatisticasRoboManual() {
     PrintEstatisticasRobo();
+}
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+    CDealInfo m_deal;
+
+    ENUM_ORDER_STATE lastOrderState = trans.order_state;
+
+    switch(trans.type) {
+    case TRADE_TRANSACTION_HISTORY_ADD: { // adição da ordem ao histórico
+        //--- identificador da transação no sistema externo - bilhete atribuído pela bolsa
+        string Exchange_ticket="";
+        if(lastOrderState==ORDER_STATE_FILLED) {
+            //Print("Ordem executada");
+        } else if (lastOrderState == ORDER_STATE_CANCELED) {
+            //Print("Ordem cancelada");
+        }
+    }
+    break;
+    case TRADE_TRANSACTION_DEAL_ADD: {
+        if(HistoryDealSelect(trans.deal))
+            m_deal.Ticket(trans.deal);
+        else {
+            Print(__FILE__," ",__FUNCTION__,", ERROR: HistoryDealSelect(",trans.deal,")");
+            return;
+        }
+
+        long reason=-1;
+        if(!m_deal.InfoInteger(DEAL_REASON,reason)) {
+            Print(__FILE__," ",__FUNCTION__,", ERROR: InfoInteger(DEAL_REASON,reason)");
+            return;
+        }
+        if (m_deal.Magic() == MagicNumber) {
+            if((ENUM_DEAL_REASON)reason==DEAL_REASON_SL)
+                Print("Stop Loss activation");
+            else if((ENUM_DEAL_REASON)reason == DEAL_REASON_TP)
+                vTPTrigger = true; //só libera para repor quando tem TP
+        }
+    }
+    break;
+    }
 }
