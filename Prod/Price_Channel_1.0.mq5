@@ -41,6 +41,9 @@
 #include <Trade\PositionInfo.mqh>
 #include <.\Personal\H9k_Includes\H9k_libs_4.mqh>
 #include <.\Personal\cartaxo_Includes\MyMagicNumber.mqh>
+
+
+
 // Enumerações
 enum ENUM_CHANNEL_LEVEL
 {
@@ -140,6 +143,9 @@ ulong MagicNumber = 0.0;
 
 MyMagicNumber myMagicNumber;
 
+
+
+
 // Variáveis globais de estatísticas
 int qtdOperacoes = 0;
 int qtdGain = 0;
@@ -212,8 +218,6 @@ int OnInit(){
     ChartSetSymbolPeriod(0, _Symbol, Periodo);
     ChartSetInteger(0,CHART_SHOW_GRID,false);
     
-    
-    
     ResetLastError();
         
     if (AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO) {
@@ -222,6 +226,8 @@ int OnInit(){
     }
     
     MagicNumber = CalcularMagicNumber(MQLInfoString(MQL_PROGRAM_NAME)+EnumToString(orginSelect), _Symbol); 
+    
+     
     
     // Configurar os níveis
     ArrayResize(niveis, 3);
@@ -306,7 +312,7 @@ int OnInit(){
     ChartRedraw(0);
     
     // Configurações de trading
-    trade.SetDeviationInPoints(10); // Desvio máximo do preço
+    //trade.SetDeviationInPoints(10); // Desvio máximo do preço
     trade.SetTypeFilling(ORDER_FILLING_RETURN); // Tipo de preenchimento
     trade.SetExpertMagicNumber(MagicNumber); // Número mágico do EA
     trade.LogLevel(LOG_LEVEL_ALL); // Nível de log
@@ -319,7 +325,7 @@ int OnInit(){
     }
     
     LogMsg(StringFormat("[%d] Inicializado com sucesso!", MagicNumber), LOG_LEVEL_INFO);
-    
+    EventSetTimer(1);
     return(INIT_SUCCEEDED);
 }
 
@@ -372,10 +378,9 @@ void OnTick(){
         //PrintEstatisticasRobo();
         return;
     }
-
-
+   
     // Obter dados do último candle
-    if(CopyRates(_Symbol, Periodo, 0, 3, rates) <= 0)
+    if(CopyRates(_Symbol, Periodo, 0, 2, rates) <= 0)
     {
         LogMsg("ERRO: Falha ao copiar dados do último candle", LOG_LEVEL_ERROR);
         return;
@@ -797,12 +802,19 @@ void VerificarEntradas(double &linhas[], int indice_linha){
 bool ExecutarCompra(double preco_entrada, double stop_loss, double take_profit)
 {
     // Abre a ordem principal de compra
-    if(trade.Buy(Volume, _Symbol, preco_entrada, stop_loss, take_profit, MQLInfoString(MQL_PROGRAM_NAME) + " : " + _Symbol)){
+    bool order_sent = trade.Buy(Volume, _Symbol, preco_entrada, stop_loss, take_profit, EnumToString(orginSelect) + " : " + _Symbol);
         LogMsg("INFO: Ordem de COMPRA executada - Volume: " + DoubleToString(Volume, 2) +
                " SL: " + DoubleToString(stop_loss, _Digits) +
                " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
+        
+    if(order_sent && !orderRejected(trade.ResultRetcode())) {
+        waitForOrderExecution(preco_entrada, MagicNumber);
+        ulong ticket = trade.ResultOrder();
+        
         return true;
     }
+    
+    
     LogMsg("ERRO ao executar ordem de COMPRA: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
     return false;
 }
@@ -812,16 +824,41 @@ bool ExecutarCompra(double preco_entrada, double stop_loss, double take_profit)
 //+------------------------------------------------------------------+
 bool ExecutarVenda(double preco_entrada, double stop_loss, double take_profit){
     // Abre a ordem principal de venda
-    if(trade.Sell(Volume, _Symbol, preco_entrada, stop_loss, take_profit, MQLInfoString(MQL_PROGRAM_NAME) + " : " + _Symbol)){
+    bool order_sent = trade.Sell(Volume, _Symbol, preco_entrada, stop_loss, take_profit, EnumToString(orginSelect) + " : " + _Symbol);
         
         LogMsg("INFO: Ordem de VENDA executada - Volume: " + DoubleToString(Volume, 2) +
                " SL: " + DoubleToString(stop_loss, _Digits) +
                " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
+    
+    if(order_sent && !orderRejected(trade.ResultRetcode())) {
+        waitForOrderExecution(preco_entrada, MagicNumber);
+        ulong ticket = trade.ResultOrder();
         return true;
     }
+    
     LogMsg("ERRO: Error ao executar ordem de VENDA: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
     return false;
 }
+
+
+bool waitForOrderExecution(double amount, ulong magicNumber) {
+    // Timeout settings
+    const int MAX_WAIT_TIME_MS = 5000; // 5 seconds
+    const int SLEEP_TIME_MS = 100;
+    int elapsed_time = 0;
+    
+    while(!has_order_at(amount, magicNumber, 0)) {
+        Sleep(SLEEP_TIME_MS);
+        elapsed_time += SLEEP_TIME_MS;
+        
+        if(elapsed_time >= MAX_WAIT_TIME_MS || HasPosition(magicNumber) == 0) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
 
 //+------------------------------------------------------------------+
 //| Encontra próximo nível superior                                    |
@@ -1157,9 +1194,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         //--- identificador da transação no sistema externo - bilhete atribuído pela bolsa
         string Exchange_ticket="";
         if(lastOrderState==ORDER_STATE_FILLED) {
-            //Print("Ordem executada");
+            Print("Ordem executada");
         } else if (lastOrderState == ORDER_STATE_CANCELED) {
-            //Print("Ordem cancelada");
+            Print("Ordem cancelada");
         }
     }
     break;
@@ -1176,12 +1213,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             Print(__FILE__," ",__FUNCTION__,", ERROR: InfoInteger(DEAL_REASON,reason)");
             return;
         }
-        if (m_deal.Magic() == MagicNumber) {
-            if((ENUM_DEAL_REASON)reason==DEAL_REASON_SL)
-                Print("Stop Loss activation");
-            else if((ENUM_DEAL_REASON)reason == DEAL_REASON_TP)
-                vTPTrigger = true; //só libera para repor quando tem TP
-        }
+        
     }
     break;
     }
