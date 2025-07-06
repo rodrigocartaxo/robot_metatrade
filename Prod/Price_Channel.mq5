@@ -1041,7 +1041,7 @@ int ConverterHorarioParaMinutos(string horario)
 //+------------------------------------------------------------------+
 string FazerChamadaHTTP(string symbol, int nivel)
 {
-    string url = "http://127.0.0.1:8080/api/fonte-dados/" + symbol + "/" + IntegerToString(nivel)+"/" + EnumToString(orginSelect);
+    string url = "http://37.27.215.180:8080/api/fonte-dados/" + symbol + "/" + IntegerToString(nivel)+"/" + EnumToString(orginSelect);
     
     LogMsg("DEBUG: Fazendo chamada HTTP para: " + url, LOG_LEVEL_DEBUG);
     
