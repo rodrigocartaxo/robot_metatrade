@@ -88,8 +88,8 @@ input double   Volume                         = 10;       // Alavacagem Lotes
 input ENUM_SIM_NAO MostrarLogs                = sim;      // Mostrar logs detalhados
 input LOG_LEVEL LogLevel                      = LOG_LEVEL_INFO; // Nível de log exibido
 input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
-input int numeroLinhas                        =  25 ; //Numero de canais
-input int percentualStopLoss                  =  75 ; //Percentual stop loss ref. Canal
+input int numeroLinhas                        =  40 ; //Numero de canais
+input int percentualStopLoss                  =  20 ; //Percentual stop loss ref. Canal
 input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas 
 
 
@@ -108,7 +108,7 @@ input double iDrawDown                       = 20;       // Percentual do valor 
 
 
 // Variáveis globais
-double ultimoPreco,vMaxProfit;
+double vMaxProfit;
 string prefixoObjeto = "PriceChannel_";
 double tickSize; // Tamanho do tick do ativo
 double incrementoTickCurrent = 0;
@@ -142,9 +142,6 @@ bool vTargetLockDrawdownLogDone = false;
 ulong MagicNumber = 0.0; 
 
 MyMagicNumber myMagicNumber;
-
-
-
 
 // Variáveis globais de estatísticas
 int qtdOperacoes = 0;
@@ -226,9 +223,6 @@ int OnInit(){
     }
     
     MagicNumber = CalcularMagicNumber(MQLInfoString(MQL_PROGRAM_NAME)+EnumToString(orginSelect), _Symbol); 
-    
-     
-    
     // Configurar os níveis
     ArrayResize(niveis, 3);
     
@@ -658,7 +652,7 @@ double NormalizarPreco(double preco)
 
 //+------------------------------------------------------------------+
 //| Verifica gatilhos nos preços de abertura e fechamento             |
-//+-------------------------------------------high-------------------+
+//+--------------------------------------------------------------+
 void VerificarGatilhos(double &linhas[]){
     if(ArraySize(rates) < 2) {
         LogMsg("ERRO: Array rates não possui candles suficientes!", LOG_LEVEL_ERROR);
@@ -671,12 +665,10 @@ void VerificarGatilhos(double &linhas[]){
         if((rates[1].open < linhas[i] && rates[1].close > linhas[i]) || 
            (rates[1].open > linhas[i] && rates[1].close < linhas[i])){
              rateGatilho = rates[1];
-             double tamanhoCandle = MathAbs(rates[1].high - rates[1].low);
               LogMsg("INFO: Gatilho acionado: " +
                      "Linha: "+ DoubleToString(linhas[i])+
-                     "Tamanho do candle: "+ DoubleToString(tamanhoCandle)+
                      "Open: "+ DoubleToString(rates[1].open)+
-                     "Close: "+ DoubleToString(rates[1].close), LOG_LEVEL_INFO); 
+                     "Close: "+ DoubleToString(rates[1].close), LOG_LEVEL_DEBUG); 
                      
             VerificarEntradas(linhas, i);
             break;
@@ -719,7 +711,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         double takeProfit = EncontrarProximoNivelSuperior(linhas, indice_linha, rates[0].close); // TP acima
         if(takeProfit > 0)
         {
-            double precoEntrada = rateGatilho.close;
+            double precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_BID);
             //double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
             double stop_calc = linhas[indice_linha] - (incrementoTickCurrent * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
@@ -762,7 +754,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         double takeProfit = EncontrarProximoNivelInferior(linhas, indice_linha, rates[0].close); // TP abaixo
         if(takeProfit > 0)
         {
-            double precoEntrada = rateGatilho.open;
+            double precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
             //double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
             double stop_calc = linhas[indice_linha] + (incrementoTickCurrent * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
@@ -803,17 +795,18 @@ bool ExecutarCompra(double preco_entrada, double stop_loss, double take_profit)
 {
     // Abre a ordem principal de compra
     bool order_sent = trade.Buy(Volume, _Symbol, preco_entrada, stop_loss, take_profit, EnumToString(orginSelect) + " : " + _Symbol);
+    if(!orderRejected(trade.ResultRetcode())) {
+      while(!HasPosition(MagicNumber) && !IsStopped()) { 
+      //se der algun status bizarro pode entrar em loop.
+             Print("waiting for order to be filled...");
+             Sleep(500);
+      }                
+     }else{
         LogMsg("INFO: Ordem de COMPRA executada - Volume: " + DoubleToString(Volume, 2) +
                " SL: " + DoubleToString(stop_loss, _Digits) +
                " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
-        
-    if(order_sent && !orderRejected(trade.ResultRetcode())) {
-        waitForOrderExecution(preco_entrada, MagicNumber);
-        ulong ticket = trade.ResultOrder();
-        
-        return true;
-    }
-    
+      return true;
+     }
     
     LogMsg("ERRO ao executar ordem de COMPRA: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
     return false;
@@ -825,16 +818,18 @@ bool ExecutarCompra(double preco_entrada, double stop_loss, double take_profit)
 bool ExecutarVenda(double preco_entrada, double stop_loss, double take_profit){
     // Abre a ordem principal de venda
     bool order_sent = trade.Sell(Volume, _Symbol, preco_entrada, stop_loss, take_profit, EnumToString(orginSelect) + " : " + _Symbol);
-        
-        LogMsg("INFO: Ordem de VENDA executada - Volume: " + DoubleToString(Volume, 2) +
+    if(!orderRejected(trade.ResultRetcode())) {
+      while(!HasPosition(MagicNumber) && !IsStopped()) { 
+      //se der algun status bizarro pode entrar em loop.
+             Print("waiting for order to be filled...");
+             Sleep(500);
+      }                
+     }else {
+     LogMsg("INFO: Ordem de VENDA executada - Volume: " + DoubleToString(Volume, 2) +
                " SL: " + DoubleToString(stop_loss, _Digits) +
                " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
-    
-    if(order_sent && !orderRejected(trade.ResultRetcode())) {
-        waitForOrderExecution(preco_entrada, MagicNumber);
-        ulong ticket = trade.ResultOrder();
         return true;
-    }
+     }
     
     LogMsg("ERRO: Error ao executar ordem de VENDA: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
     return false;
