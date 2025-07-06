@@ -89,7 +89,7 @@ input ENUM_SIM_NAO MostrarLogs                = sim;      // Mostrar logs detalh
 input LOG_LEVEL LogLevel                      = LOG_LEVEL_INFO; // Nível de log exibido
 input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
 input int numeroLinhas                        =  40 ; //Numero de canais
-input int percentualStopLoss                  =  20 ; //Percentual stop loss ref. Canal
+input int percentualStopLoss                  =  25 ; //Percentual Stoploss x Breakeven ref. Canal
 input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas 
 
 
@@ -105,6 +105,11 @@ input int    iDailyTarget                    = 10000;    // Meta de ganho
 input int    iLossTarget                     = 500;     // Loss máximo 
 input double iDDTrigger                      = 300;     // Valor para ativar o drawdown
 input double iDrawDown                       = 20;       // Percentual do valor para fechar posição
+
+input group "=== Gerenciamento de Breakeven ==="
+input ENUM_SIM_NAO AtivarBreakeven = sim; // Ativar breakeven automático
+input ENUM_SIM_NAO AumentarTPBreakeven = sim; // Aumentar TP no breakeven
+input double PercentualAumentoTP = 50; // Percentual para aumentar TP
 
 
 // Variáveis globais
@@ -150,6 +155,10 @@ int qtdLoss = 0;
 
 datetime ultimoCandleEntrada = 0; // Trava para apenas uma entrada por candle de gatilho
 datetime ultimoDiaConfig = 0; // Novo: controle do último dia de configuração
+
+// Variáveis para breakeven
+bool breakevenExecutado = false;
+double precoBreakeven = 0;
 
 
 //+------------------------------------------------------------------+
@@ -293,6 +302,9 @@ int OnInit(){
         LogMsg("Preço Base: " + DoubleToString(niveis[nivelIndex].precoBase, _Digits), LOG_LEVEL_DEBUG);
         LogMsg("Incremento: " + DoubleToString(niveis[nivelIndex].incrementoTick, 0), LOG_LEVEL_DEBUG);
         incrementoTickCurrent = niveis[nivelIndex].incrementoTick;
+        
+        // Calcular e criar linhas no início
+        CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
         CriarLinhasNivel(niveis[nivelIndex]);
     }
     else {
@@ -351,7 +363,10 @@ void OnTick(){
                 niveis[nivelIndex].incrementoTick = configGeral.tamanhoCanal;
                 niveis[nivelIndex].nivel = configGeral.nivel;
                 incrementoTickCurrent = niveis[nivelIndex].incrementoTick;
+                
+                // Recalcular e recriar linhas para o novo dia
                 LimparObjetos();
+                CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
                 CriarLinhasNivel(niveis[nivelIndex]);
                 ChartRedraw(0);
                 LogMsg("Configuração do canal recarregada para o novo dia.", LOG_LEVEL_INFO);
@@ -381,6 +396,15 @@ void OnTick(){
     }
     ArraySetAsSeries(rates, true);
    
+   if (riskManagement == sim){
+         GerenciarRisk();
+     }   
+   
+    // Gerenciar breakeven
+    if (AtivarBreakeven == sim) {
+        GerenciarBreakeven();
+    }
+   
    if(AtivarInterval == sim){
       if(EstaNoHorarioDePausa(iHoraInterval1,iHoraInterval2)){
          if (isNewBar(Periodo)) {
@@ -390,26 +414,110 @@ void OnTick(){
          return;
       }  
     }
-    
-    if (riskManagement == sim){
-         GerenciarRisk();
-     }   
-   
 
     if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)){
-        
-        if (isNewBar(Periodo)){
-           CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
-           AtualizarLinhasNivel(niveis[nivelIndex]);
-           ChartRedraw(0);
-        }
         VerificarGatilhos(linhasPreco);
-        
     }
     
+}
+
+//+------------------------------------------------------------------+
+//| Gerencia o breakeven das posições abertas                        |
+//+------------------------------------------------------------------+
+void GerenciarBreakeven() {
+    if (!has_open_position(MagicNumber)) {
+        // Reset da flag quando não há posição
+        breakevenExecutado = false;
+        precoBreakeven = 0;
+        return;
+    }
     
-    
-    
+    // Buscar posição aberta
+    for(int i = 0; i < PositionsTotal(); i++) {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket)) {
+            if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+               PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+                
+                double precoEntrada = PositionGetDouble(POSITION_PRICE_OPEN);
+                double stopAtual = PositionGetDouble(POSITION_SL);
+                double takeProfit = PositionGetDouble(POSITION_TP);
+                ENUM_POSITION_TYPE tipo = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                double precoAtual = 0;
+                
+                // Obter preço atual baseado no tipo de posição
+                if(tipo == POSITION_TYPE_BUY) {
+                    precoAtual = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                } else if(tipo == POSITION_TYPE_SELL) {
+                    precoAtual = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                }
+                
+                // Calcular preço de ativação do breakeven
+                double precoAtivacaoBreakeven = 0;
+                
+                if(tipo == POSITION_TYPE_BUY) {
+                    precoAtivacaoBreakeven = precoEntrada + (incrementoTickCurrent * (percentualStopLoss/100.0));
+                    
+                    // Verificar se deve ativar breakeven
+                    if(precoAtual >= precoAtivacaoBreakeven && !breakevenExecutado) {
+                        double novoStop = precoEntrada + tickSize; // Breakeven + 1 tick
+                        double novoTP = takeProfit; // TP original
+                        
+                        // Aumentar TP se configurado
+                        if(AumentarTPBreakeven == sim) {
+                            novoTP = takeProfit + (incrementoTickCurrent * (PercentualAumentoTP/100.0));
+                        }
+                        
+                        if(trade.PositionModify(ticket, roundPriceH9K(novoStop,tickSize), roundPriceH9K(novoTP,tickSize))) {
+                            if(AumentarTPBreakeven == sim) {
+                                LogMsg("BREAKEVEN + TP AUMENTADO - Compra: Stop: " + 
+                                       DoubleToString(novoStop, _Digits) + " TP: " + DoubleToString(novoTP, _Digits), LOG_LEVEL_INFO);
+                            } else {
+                                LogMsg("BREAKEVEN ATIVADO - Compra: Stop movido para " + 
+                                       DoubleToString(novoStop, _Digits), LOG_LEVEL_INFO);
+                            }
+                            breakevenExecutado = true;
+                        } else {
+                            LogMsg("ERRO ao ativar breakeven: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
+                        }
+                    }
+                } else if(tipo == POSITION_TYPE_SELL) {
+                    precoAtivacaoBreakeven = precoEntrada - (incrementoTickCurrent * (percentualStopLoss/100.0));
+                    
+                    // Verificar se deve ativar breakeven
+                    if(precoAtual <= precoAtivacaoBreakeven && !breakevenExecutado) {
+                        double novoStop = precoEntrada - tickSize; // Breakeven - 1 tick
+                        double novoTP = takeProfit; // TP original
+                        
+                        // Aumentar TP se configurado
+                        if(AumentarTPBreakeven == sim) {
+                            novoTP = takeProfit - (incrementoTickCurrent * (PercentualAumentoTP/100.0));
+                        }
+                        
+                        if(trade.PositionModify(ticket, roundPriceH9K(novoStop,tickSize), roundPriceH9K(novoTP,tickSize))) {
+                            if(AumentarTPBreakeven == sim) {
+                                LogMsg("BREAKEVEN + TP AUMENTADO - Venda: Stop: " + 
+                                       DoubleToString(novoStop, _Digits) + " TP: " + DoubleToString(novoTP, _Digits), LOG_LEVEL_INFO);
+                            } else {
+                                LogMsg("BREAKEVEN ATIVADO - Venda: Stop movido para " + 
+                                       DoubleToString(novoStop, _Digits), LOG_LEVEL_INFO);
+                            }
+                            breakevenExecutado = true;
+                        } else {
+                            LogMsg("ERRO ao ativar breakeven: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
+                        }
+                    }
+                }
+                
+                // Debug info
+                    LogMsg("DEBUG Breakeven - Preço Atual: " + DoubleToString(precoAtual, _Digits) + 
+                           " Preço Ativação: " + DoubleToString(precoAtivacaoBreakeven, _Digits) + 
+                           " Executado: " + (breakevenExecutado ? "SIM" : "NÃO"), LOG_LEVEL_DEBUG);
+                
+                break; // Só uma posição por vez
+            }
+        }
+    }
 }
 
 void GerenciarRisk(){
