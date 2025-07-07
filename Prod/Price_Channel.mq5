@@ -90,7 +90,7 @@ input LOG_LEVEL LogLevel                      = LOG_LEVEL_INFO; // Nível de log
 input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
 input int numeroLinhas                        =  40 ; //Numero de canais
 input int percentualStopLoss                  =  25 ; //Percentual Stoploss x Breakeven ref. Canal
-input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas 
+//input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas 
 
 
 input group "=== Configurações Canais ==="
@@ -143,6 +143,7 @@ bool vTargetLockDrawdown = false;
 bool vTargetLockMetaLogDone = false;
 bool vTargetLockLossLogDone = false;
 bool vTargetLockDrawdownLogDone = false;
+ENUM_ORIGIN orginSelect                 = OTHON;
 
 ulong MagicNumber = 0.0; 
 
@@ -220,6 +221,12 @@ ulong CalcularMagicNumber(const string eaName, const string symbol) {
 //| Expert initialization function                                     |
 //+------------------------------------------------------------------+
 int OnInit(){
+    // Validação de licença/validade de 2 meses
+    datetime validade = D'2024.08.31'; // Ajuste a data conforme necessário
+    if (TimeCurrent() < validade) {
+        LogMsg("Error ! Contate o suporte.", LOG_LEVEL_ERROR);
+        return INIT_FAILED;
+    }
     
     ChartSetSymbolPeriod(0, _Symbol, Periodo);
     ChartSetInteger(0,CHART_SHOW_GRID,false);
@@ -604,7 +611,7 @@ void CalcularLinhasPreco(double &linhas[], NivelCanal &nivel)
     
     for(int i = 0; i < numeroLinhas; i++)
     {
-        linhas[i] = nivel.precoBase + (i * nivel.incrementoTick);
+        linhas[i] = nivel.precoBase - (i * nivel.incrementoTick);
     }
 }
 
@@ -968,7 +975,7 @@ bool waitForOrderExecution(double amount, ulong magicNumber) {
 //+------------------------------------------------------------------+
 double EncontrarProximoNivelSuperior(double &linhas[], int indice_atual, double preco_ref)
 {
-    for(int j = indice_atual + 1; j < ArraySize(linhas); j++)
+    for(int j = indice_atual - 1; j < ArraySize(linhas); j++)
     {
         if(linhas[j] > preco_ref)
             return linhas[j];
@@ -981,7 +988,7 @@ double EncontrarProximoNivelSuperior(double &linhas[], int indice_atual, double 
 //+------------------------------------------------------------------+
 double EncontrarProximoNivelInferior(double &linhas[], int indice_atual, double preco_ref)
 {
-    for(int j = indice_atual - 1; j >= 0; j--)
+    for(int j = indice_atual + 1; j >= 0; j--)
     {
         if(linhas[j] < preco_ref)
             return linhas[j];
