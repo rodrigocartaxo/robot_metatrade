@@ -441,12 +441,7 @@ void GerenciarBreakeven() {
                     
                     // Verificar se deve ativar breakeven
                     if(precoAtual >= precoAtivacaoBreakeven && !breakevenExecutado) {
-                        // Novo cálculo: stop nunca acima do preço atual
-                        double novoStop = precoEntrada;
-                        if (precoAtual > precoEntrada + tickSize)
-                            novoStop = precoEntrada + tickSize;
-                        if (novoStop > precoAtual)
-                            novoStop = precoAtual - tickSize; // Segurança: nunca acima do preço atual
+                        double novoStop = CalcularNovoStopBreakeven(tipo, precoEntrada, precoAtual);
                         double novoTP = takeProfit; // TP original
                         
                         // Aumentar TP se configurado
@@ -472,12 +467,7 @@ void GerenciarBreakeven() {
                     
                     // Verificar se deve ativar breakeven
                     if(precoAtual <= precoAtivacaoBreakeven && !breakevenExecutado) {
-                        // Novo cálculo: stop nunca abaixo do preço atual
-                        double novoStop = precoEntrada;
-                        if (precoAtual < precoEntrada - tickSize)
-                            novoStop = precoEntrada - tickSize;
-                        if (novoStop < precoAtual)
-                            novoStop = precoAtual + tickSize; // Segurança: nunca abaixo do preço atual
+                        double novoStop = CalcularNovoStopBreakeven(tipo, precoEntrada, precoAtual);
                         double novoTP = takeProfit; // TP original
                         
                         // Aumentar TP se configurado
@@ -1210,6 +1200,25 @@ void LiberarLockLoss() {
 void LiberarLockDrawdown() {
     vTargetLockDrawdown = false;
     vTargetLockDrawdownLogDone = false;
+}
+
+//+------------------------------------------------------------------+
+//| Função utilitária para calcular o novo stop do breakeven         |
+//+------------------------------------------------------------------+
+double CalcularNovoStopBreakeven(ENUM_POSITION_TYPE tipo, double precoEntrada, double precoAtual) {
+    double novoStop = precoEntrada;
+    if(tipo == POSITION_TYPE_BUY) {
+        if (precoAtual > precoEntrada + tickSize)
+            novoStop = precoEntrada + tickSize;
+        if (novoStop > precoAtual)
+            novoStop = precoAtual - tickSize; // Segurança: nunca acima do preço atual
+    } else if(tipo == POSITION_TYPE_SELL) {
+        if (precoAtual < precoEntrada - tickSize)
+            novoStop = precoEntrada - tickSize;
+        if (novoStop < precoAtual)
+            novoStop = precoAtual + tickSize; // Segurança: nunca abaixo do preço atual
+    }
+    return novoStop;
 }
 
 //+------------------------------------------------------------------+
