@@ -8,34 +8,6 @@
 #property version   "1.00"
 #property description "Expert Advisor para Price Channel com API externa"
 
-//+------------------------------------------------------------------+
-//| Sugestões para Futuras Melhorias:                                  |
-//|                                                                     |
-//| 1. Indicadores Técnicos:                                           |
-//|    - Adicionar mais indicadores para filtrar sinais                |
-//|    - Implementar confirmações com médias móveis                    |
-//|    - Usar osciladores para confirmar momentum                      |
-//|                                                                     |
-//| 2. Painel Informativo:                                             |
-//|    - Mostrar estatísticas de trades                               |
-//|    - Exibir resultados históricos                                 |
-//|    - Calcular taxa de acerto                                      |
-//|                                                                     |
-//| 3. Gerenciamento de Posições:                                      |
-//|    - Implementar breakeven automático                             |
-//|    - Adicionar trailing stop                                      |
-//|    - Criar sistema de saída parcial                               |
-//|                                                                     |
-//| 4. Expansão do Sistema:                                            |
-//|    - Adicionar mais níveis de canais                              |
-//|    - Permitir configuração dinâmica de níveis                     |
-//|    - Implementar outros tipos de canais                           |
-//|                                                                     |
-//| 5. Filtros Adicionais:                                            |
-//|    - Adicionar filtros de volatilidade                           |
-//|    - Implementar filtros de spread                               |
-//+------------------------------------------------------------------+
-
 // Inclusão de bibliotecas necessárias
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
@@ -89,8 +61,8 @@ input ENUM_SIM_NAO MostrarLogs                = sim;      // Mostrar logs detalh
 input LOG_LEVEL LogLevel                      = LOG_LEVEL_INFO; // Nível de log exibido
 input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
 input int numeroLinhas                        =  40 ; //Numero de canais
-input int percentualStopLoss                  =  25 ; //Percentual Stoploss x Breakeven ref. Canal
-//input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas 
+input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas 
+input int DesvioMaximoPontos = 20; // Desvio máximo permitido (slippage) em pontos
 
 
 input group "=== Configurações Canais ==="
@@ -110,6 +82,8 @@ input group "=== Gerenciamento de Breakeven ==="
 input ENUM_SIM_NAO AtivarBreakeven = sim; // Ativar breakeven automático
 input ENUM_SIM_NAO AumentarTPBreakeven = sim; // Aumentar TP no breakeven
 input double PercentualAumentoTP = 50; // Percentual para aumentar TP
+input int percentualStopLoss                  =  30 ; //Percentual Stoploss x Breakeven ref. Canal
+
 
 
 // Variáveis globais
@@ -143,7 +117,7 @@ bool vTargetLockDrawdown = false;
 bool vTargetLockMetaLogDone = false;
 bool vTargetLockLossLogDone = false;
 bool vTargetLockDrawdownLogDone = false;
-ENUM_ORIGIN orginSelect                 = OTHON;
+//ENUM_ORIGIN orginSelect                 = VIANA;
 
 ulong MagicNumber = 0.0; 
 
@@ -325,7 +299,7 @@ int OnInit(){
     ChartRedraw(0);
     
     // Configurações de trading
-    //trade.SetDeviationInPoints(10); // Desvio máximo do preço
+    trade.SetDeviationInPoints(DesvioMaximoPontos); // Usa o valor configurado pelo usuário
     trade.SetTypeFilling(ORDER_FILLING_RETURN); // Tipo de preenchimento
     trade.SetExpertMagicNumber(MagicNumber); // Número mágico do EA
     trade.LogLevel(LOG_LEVEL_ALL); // Nível de log
@@ -467,7 +441,12 @@ void GerenciarBreakeven() {
                     
                     // Verificar se deve ativar breakeven
                     if(precoAtual >= precoAtivacaoBreakeven && !breakevenExecutado) {
-                        double novoStop = precoEntrada + tickSize; // Breakeven + 1 tick
+                        // Novo cálculo: stop nunca acima do preço atual
+                        double novoStop = precoEntrada;
+                        if (precoAtual > precoEntrada + tickSize)
+                            novoStop = precoEntrada + tickSize;
+                        if (novoStop > precoAtual)
+                            novoStop = precoAtual - tickSize; // Segurança: nunca acima do preço atual
                         double novoTP = takeProfit; // TP original
                         
                         // Aumentar TP se configurado
@@ -493,7 +472,12 @@ void GerenciarBreakeven() {
                     
                     // Verificar se deve ativar breakeven
                     if(precoAtual <= precoAtivacaoBreakeven && !breakevenExecutado) {
-                        double novoStop = precoEntrada - tickSize; // Breakeven - 1 tick
+                        // Novo cálculo: stop nunca abaixo do preço atual
+                        double novoStop = precoEntrada;
+                        if (precoAtual < precoEntrada - tickSize)
+                            novoStop = precoEntrada - tickSize;
+                        if (novoStop < precoAtual)
+                            novoStop = precoAtual + tickSize; // Segurança: nunca abaixo do preço atual
                         double novoTP = takeProfit; // TP original
                         
                         // Aumentar TP se configurado
@@ -801,12 +785,12 @@ void VerificarEntradas(double &linhas[], int indice_linha){
     }
     // Trava: só permite uma entrada por candle de gatilho
     if (ultimoCandleEntrada == rateGatilho.time) {
-        LogMsg("Já houve entrada neste candle de gatilho, ignorando novo gatilho.", LOG_LEVEL_INFO);
+        LogMsg("Já houve entrada neste candle de gatilho, ignorando novo gatilho.", LOG_LEVEL_DEBUG);
         return;
     }
     // Bloqueio por locks de risco
     if (vTargetLockMeta || vTargetLockLoss || vTargetLockDrawdown) {
-        LogMsg("ENTRADA BLOQUEADA: Algum lock de risco está ativo (Meta, Loss ou Drawdown)", LOG_LEVEL_INFO);
+        LogMsg("ENTRADA BLOQUEADA: Algum lock de risco está ativo (Meta, Loss ou Drawdown)", LOG_LEVEL_DEBUG);
         return;
     }
     
@@ -820,7 +804,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
        && rateGatilho.high < SymbolInfoDouble(_Symbol, SYMBOL_BID) ){
         // Permite apenas uma ordem aberta ou pendente por vez
         if (has_open_position(MagicNumber) || has_open_order(MagicNumber)) {
-            LogMsg("INFO: Já existe uma posição ou ordem pendente aberta. Não será aberta nova ordem de COMPRA.", LOG_LEVEL_INFO);
+            LogMsg("INFO: Já existe uma posição ou ordem pendente aberta. Não será aberta nova ordem de COMPRA.", LOG_LEVEL_DEBUG);
             return;
         }
         double takeProfit = EncontrarProximoNivelSuperior(linhas, indice_linha, rates[0].close); // TP acima
