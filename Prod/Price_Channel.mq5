@@ -1074,7 +1074,7 @@ string FazerChamadaHTTP(string symbol, int nivel)
 //+------------------------------------------------------------------+
 string CriarConfiguracaoPadrao(string symbol, int nivel)
 {
-    string config = "{\"ativo\":\"" + symbol + "\",\"marcoZero\":121800,\"tamanhoCanal\":748,\"nivel\":" + DoubleToString(nivel) + "}";
+    string config = "{\"ativo\":\"" + symbol + "\",\"marcoZero\":146014.0,\"tamanhoCanal\":824.38,\"nivel\":" + DoubleToString(nivel) + "}";
     LogMsg("DEBUG: Configuração padrão criada para nível " + IntegerToString(nivel) + ": " + config, LOG_LEVEL_DEBUG);
     return config;
 }
