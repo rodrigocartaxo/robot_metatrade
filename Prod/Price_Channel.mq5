@@ -82,7 +82,7 @@ input group "=== Gerenciamento de Breakeven ==="
 input ENUM_SIM_NAO AtivarBreakeven = sim; // Ativar breakeven automático
 input ENUM_SIM_NAO AumentarTPBreakeven = sim; // Aumentar TP no breakeven
 input double PercentualAumentoTP = 50; // Percentual para aumentar TP
-input int percentualStopLoss                  =  30 ; //Percentual Stoploss x Breakeven ref. Canal
+input int percentualStopLoss     =  30 ; //Percentual Stoploss x Breakeven ref. Canal
 
 
 
