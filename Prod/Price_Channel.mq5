@@ -14,7 +14,8 @@
 #include <.\Personal\H9k_Includes\H9k_libs_4.mqh>
 #include <.\Personal\cartaxo_Includes\MyMagicNumber.mqh>
 
-
+#define ACCOUNT_MARGIN_MODE_NETTING 0
+#define ACCOUNT_MARGIN_MODE_HEDGED  1
 
 // Enumerações
 enum ENUM_CHANNEL_LEVEL
@@ -62,7 +63,8 @@ input LOG_LEVEL LogLevel                      = LOG_LEVEL_INFO; // Nível de log
 input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas linhas
 input int numeroLinhas                        =  40 ; //Numero de canais
 input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas 
-input int DesvioMaximoPontos = 20; // Desvio máximo permitido (slippage) em pontos
+input int DesvioMaximoPontos = 10; // Desvio máximo permitido (slippage) em pontos
+input int percentualStopLoss     =  30 ; //Percentual Stoploss x Breakeven ref. Canal
 
 
 input group "=== Configurações Canais ==="
@@ -78,11 +80,6 @@ input int    iLossTarget                     = 500;     // Loss máximo
 input double iDDTrigger                      = 300;     // Valor para ativar o drawdown
 input double iDrawDown                       = 20;       // Percentual do valor para fechar posição
 
-input group "=== Gerenciamento de Breakeven ==="
-input ENUM_SIM_NAO AtivarBreakeven = sim; // Ativar breakeven automático
-input ENUM_SIM_NAO AumentarTPBreakeven = sim; // Aumentar TP no breakeven
-input double PercentualAumentoTP = 50; // Percentual para aumentar TP
-input int percentualStopLoss     =  30 ; //Percentual Stoploss x Breakeven ref. Canal
 
 
 
@@ -131,10 +128,14 @@ int qtdLoss = 0;
 datetime ultimoCandleEntrada = 0; // Trava para apenas uma entrada por candle de gatilho
 datetime ultimoDiaConfig = 0; // Novo: controle do último dia de configuração
 
-// Variáveis para breakeven
-bool breakevenExecutado = false;
-double precoBreakeven = 0;
+bool ordensAberta = false;
 
+double nivelBase = 0.0;
+
+// Variáveis globais para breakeven por canal
+int canalEntradaIndex = -1;
+double alvo_breakeven = 0.0;
+bool breakevenAtivado = false;
 
 //+------------------------------------------------------------------+
 //| Estrutura para armazenar configurações de nível                    |
@@ -160,50 +161,25 @@ struct ConfiguracaoCanal {
 NivelCanal niveis[];
 ConfiguracaoCanal configGeral;     // Torna global para uso em OnTick
 
-//+------------------------------------------------------------------+
-//| Função para log com nível                                        |
-//+------------------------------------------------------------------+
-void LogMsg(string mensagem, LOG_LEVEL nivel)
-{
-   if (MostrarLogs == sim && nivel <= LogLevel) {
-    if (nivel == LOG_LEVEL_ERROR) {
-        Alert(mensagem);
-    } else if (nivel == LOG_LEVEL_INFO) {
-           Print(mensagem);
-    } else if (nivel == LOG_LEVEL_DEBUG) {
-        Print(mensagem);
-    }
-}
-}
-
-//+------------------------------------------------------------------+
-//| Função para calcular Magic Number único e consistente             |
-//+------------------------------------------------------------------+
-ulong CalcularMagicNumber(const string eaName, const string symbol) {
-    ulong hash = 5381;
-    string key = eaName + ":" + symbol;
-    for(int i = 0; i < StringLen(key); i++) {
-        hash = ((hash << 5) + hash) + (uchar)StringGetCharacter(key, i); // hash * 33 + c
-    }
-    // Garante que o número não seja zero e caiba em 9 dígitos (limite do MetaTrader)
-    hash = hash % 1000000000ULL;
-    if(hash == 0) hash = 1;
-    return hash;
-}
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                     |
 //+------------------------------------------------------------------+
 int OnInit(){
-    // Validação de licença/validade de 2 meses
-    datetime validade = D'2024.08.31'; // Ajuste a data conforme necessário
-    if (TimeCurrent() < validade) {
-        LogMsg("Error ! Contate o suporte.", LOG_LEVEL_ERROR);
+ 
+ 
+    if (AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_NETTING) {
+        Print("Este EA só pode ser executado em contas em modo NETTING.");
         return INIT_FAILED;
     }
     
     ChartSetSymbolPeriod(0, _Symbol, Periodo);
+    ChartSetInteger(0, CHART_COLOR_BACKGROUND, clrBlack); // Fundo preto
+    ChartSetInteger(0, CHART_COLOR_FOREGROUND, clrLightGreen); // Eixos, preço, tempo em verde claro
+    ChartSetInteger(0, CHART_COLOR_VOLUME, clrGray); // Volume cinza
+    ChartSetInteger(0, CHART_COLOR_GRID, clrDimGray); // Grid discreto
     ChartSetInteger(0,CHART_SHOW_GRID,false);
+    ChartSetInteger(0,CHART_SHOW_VOLUMES,false);
     
     ResetLastError();
         
@@ -312,7 +288,8 @@ int OnInit(){
     }
     
     LogMsg(StringFormat("[%d] Inicializado com sucesso!", MagicNumber), LOG_LEVEL_INFO);
-    EventSetTimer(1);
+    // No início do OnInit, sincronizar a flag com o estado real
+    posicaoAberta = has_open_position(MagicNumber);
     return(INIT_SUCCEEDED);
 }
 
@@ -333,6 +310,11 @@ void OnDeinit(const int reason){
 //| Expert tick function                                              |
 //+------------------------------------------------------------------+
 void OnTick(){
+    // Sincroniza a flag com o status real da corretora
+    if (isNewBar(Periodo)){
+      posicaoAberta = has_open_position(MagicNumber);
+    }
+    
     // Novo: verifica se mudou o dia e recarrega config se necessário
     datetime diaAtual = iTime(_Symbol, PERIOD_D1, 0);
     int nivelSelecionado = (int)NivelAtivo;
@@ -379,14 +361,11 @@ void OnTick(){
    
    if (riskManagement == sim){
          GerenciarRisk();
-     }   
+   }   
    
-    // Gerenciar breakeven
-    if (AtivarBreakeven == sim) {
-        GerenciarBreakeven();
-    }
-   
-   if(AtivarInterval == sim){
+    
+    
+    if(AtivarInterval == sim){
       if(EstaNoHorarioDePausa(iHoraInterval1,iHoraInterval2)){
          if (isNewBar(Periodo)) {
             LogMsg("INFO: Hora de intervalo ativada ", LOG_LEVEL_INFO);
@@ -395,111 +374,34 @@ void OnTick(){
          return;
       }  
     }
-
-    if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)){
-        VerificarGatilhos(linhasPreco);
+   
+   // No OnTick, só chama VerificarGatilhos se !posicaoAberta 
+   if (!posicaoAberta) {
+     if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)){
+            VerificarGatilhos(linhasPreco);
+        }
     }
     
-}
-
-//+------------------------------------------------------------------+
-//| Gerencia o breakeven das posições abertas                        |
-//+------------------------------------------------------------------+
-void GerenciarBreakeven() {
-    if (!has_open_position(MagicNumber)) {
-        // Reset da flag quando não há posição
-        breakevenExecutado = false;
-        precoBreakeven = 0;
-        return;
-    }
-    
-    // Buscar posição aberta
-    for(int i = 0; i < PositionsTotal(); i++) {
-        ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket)) {
-            if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-               PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
-                
-                double precoEntrada = PositionGetDouble(POSITION_PRICE_OPEN);
-                double stopAtual = PositionGetDouble(POSITION_SL);
-                double takeProfit = PositionGetDouble(POSITION_TP);
-                ENUM_POSITION_TYPE tipo = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-                double precoAtual = 0;
-                
-                // Obter preço atual baseado no tipo de posição
-                if(tipo == POSITION_TYPE_BUY) {
-                    precoAtual = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-                } else if(tipo == POSITION_TYPE_SELL) {
-                    precoAtual = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-                }
-                
-                // Calcular preço de ativação do breakeven
-                double precoAtivacaoBreakeven = 0;
-                
-                if(tipo == POSITION_TYPE_BUY) {
-                    precoAtivacaoBreakeven = precoEntrada + (incrementoTickCurrent * (percentualStopLoss/100.0));
-                    
-                    // Verificar se deve ativar breakeven
-                    if(precoAtual >= precoAtivacaoBreakeven && !breakevenExecutado) {
-                        double novoStop = CalcularNovoStopBreakeven(tipo, precoEntrada, precoAtual);
-                        double novoTP = takeProfit; // TP original
-                        
-                        // Aumentar TP se configurado
-                        if(AumentarTPBreakeven == sim) {
-                            novoTP = takeProfit + (incrementoTickCurrent * (PercentualAumentoTP/100.0));
-                        }
-                        
-                        if(trade.PositionModify(ticket, roundPriceH9K(novoStop,tickSize), roundPriceH9K(novoTP,tickSize))) {
-                            if(AumentarTPBreakeven == sim) {
-                                LogMsg("BREAKEVEN + TP AUMENTADO - Compra: Stop: " + 
-                                       DoubleToString(novoStop, _Digits) + " TP: " + DoubleToString(novoTP, _Digits), LOG_LEVEL_INFO);
-                            } else {
-                                LogMsg("BREAKEVEN ATIVADO - Compra: Stop movido para " + 
-                                       DoubleToString(novoStop, _Digits), LOG_LEVEL_INFO);
-                            }
-                            breakevenExecutado = true;
-                        } else {
-                            LogMsg("ERRO ao ativar breakeven: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
-                        }
-                    }
-                } else if(tipo == POSITION_TYPE_SELL) {
-                    precoAtivacaoBreakeven = precoEntrada - (incrementoTickCurrent * (percentualStopLoss/100.0));
-                    
-                    // Verificar se deve ativar breakeven
-                    if(precoAtual <= precoAtivacaoBreakeven && !breakevenExecutado) {
-                        double novoStop = CalcularNovoStopBreakeven(tipo, precoEntrada, precoAtual);
-                        double novoTP = takeProfit; // TP original
-                        
-                        // Aumentar TP se configurado
-                        if(AumentarTPBreakeven == sim) {
-                            novoTP = takeProfit - (incrementoTickCurrent * (PercentualAumentoTP/100.0));
-                        }
-                        
-                        if(trade.PositionModify(ticket, roundPriceH9K(novoStop,tickSize), roundPriceH9K(novoTP,tickSize))) {
-                            if(AumentarTPBreakeven == sim) {
-                                LogMsg("BREAKEVEN + TP AUMENTADO - Venda: Stop: " + 
-                                       DoubleToString(novoStop, _Digits) + " TP: " + DoubleToString(novoTP, _Digits), LOG_LEVEL_INFO);
-                            } else {
-                                LogMsg("BREAKEVEN ATIVADO - Venda: Stop movido para " + 
-                                       DoubleToString(novoStop, _Digits), LOG_LEVEL_INFO);
-                            }
-                            breakevenExecutado = true;
-                        } else {
-                            LogMsg("ERRO ao ativar breakeven: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
-                        }
-                    }
-                }
-                
-                // Debug info
-                    LogMsg("DEBUG Breakeven - Preço Atual: " + DoubleToString(precoAtual, _Digits) + 
-                           " Preço Ativação: " + DoubleToString(precoAtivacaoBreakeven, _Digits) + 
-                           " Executado: " + (breakevenExecutado ? "SIM" : "NÃO"), LOG_LEVEL_DEBUG);
-                
-                break; // Só uma posição por vez
+    // Gerenciamento de breakeven por canal
+    if (posicaoAberta && canalEntradaIndex >= 0 && !breakevenAtivado) {
+        double precoAtual = 0;
+        if(PositionSelectByTicket(posicaoTicket)) {
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            precoAtual = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            if ((type == POSITION_TYPE_BUY && precoAtual >= alvo_breakeven) ||
+                (type == POSITION_TYPE_SELL && precoAtual <= alvo_breakeven)) {
+                GerenciarBreakevenPorCanal(linhasPreco);
+                breakevenAtivado = true;
             }
         }
     }
+
+    // Cancela ordens pendentes de parciais se não houver mais posição aberta
+    if (!posicaoAberta) {
+        CancelarOrdensParciais();
+    }
 }
+
 
 void GerenciarRisk(){
     double l_result = DailyResult(MagicNumber) + OpenResult(MagicNumber);
@@ -726,17 +628,6 @@ color ColorBrighten(color clr, int percent)
     return (color)((r << 16) + (g << 8) + b);
 }
 
-//+------------------------------------------------------------------+
-//| Arredonda o preço de acordo com o tick size do ativo              |
-//+------------------------------------------------------------------+
-double NormalizarPreco(double preco)
-{
-    if(tickSize == 0)
-        return preco;
-        
-    return NormalizeDouble(MathRound(preco / tickSize) * tickSize, _Digits);
-}
-
 
 
 //+------------------------------------------------------------------+
@@ -747,6 +638,8 @@ void VerificarGatilhos(double &linhas[]){
         LogMsg("ERRO: Array rates não possui candles suficientes!", LOG_LEVEL_ERROR);
         return;
     }
+    
+    
     // Verificar se o candle atravessa alguma linha
     for(int i = 0; i < ArraySize(linhas); i++)
     {
@@ -754,7 +647,8 @@ void VerificarGatilhos(double &linhas[]){
         if((rates[1].open < linhas[i] && rates[1].close > linhas[i]) || 
            (rates[1].open > linhas[i] && rates[1].close < linhas[i])){
              rateGatilho = rates[1];
-              LogMsg("INFO: Gatilho acionado: " +
+             nivelBase = linhas[i];
+             LogMsg("INFO: Gatilho acionado: " +
                      "Linha: "+ DoubleToString(linhas[i])+
                      "Open: "+ DoubleToString(rates[1].open)+
                      "Close: "+ DoubleToString(rates[1].close), LOG_LEVEL_DEBUG); 
@@ -773,58 +667,49 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         LogMsg("ERRO: indice_linha fora do range do array de linhas!", LOG_LEVEL_ERROR);
         return;
     }
-    // Trava: só permite uma entrada por candle de gatilho
-    if (ultimoCandleEntrada == rateGatilho.time) {
-        LogMsg("Já houve entrada neste candle de gatilho, ignorando novo gatilho.", LOG_LEVEL_DEBUG);
-        return;
-    }
     // Bloqueio por locks de risco
     if (vTargetLockMeta || vTargetLockLoss || vTargetLockDrawdown) {
         LogMsg("ENTRADA BLOQUEADA: Algum lock de risco está ativo (Meta, Loss ou Drawdown)", LOG_LEVEL_DEBUG);
         return;
     }
-    
     double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-    
     LogMsg("DEBUG: StopLevel exigido pelo ativo: " + DoubleToString(stopLevel, _Digits), LOG_LEVEL_DEBUG);
     LogMsg("DEBUG: TickSize do ativo: " + DoubleToString(tickSize, _Digits), LOG_LEVEL_DEBUG);
-    
+    double incremento = incrementoTickCurrent;
+    double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double volumeStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    double vol1 = MathMax(NormalizeDouble(MathRound((Volume * 0.3) / volumeStep) * volumeStep, 2), minVolume);
+    double vol2 = MathMax(NormalizeDouble(MathRound((Volume * 0.5) / volumeStep) * volumeStep, 2), minVolume);
+    double vol3 = MathMax(NormalizeDouble(MathRound((Volume - vol1 - vol2) / volumeStep) * volumeStep, 2), minVolume);
     // Compra: fechamento acima da linha -> EXECUTA COMPRA
     if(rates[0].close > linhas[indice_linha] 
        && rateGatilho.high < SymbolInfoDouble(_Symbol, SYMBOL_BID) ){
-        // Permite apenas uma ordem aberta ou pendente por vez
-        if (has_open_position(MagicNumber) || has_open_order(MagicNumber)) {
-            LogMsg("INFO: Já existe uma posição ou ordem pendente aberta. Não será aberta nova ordem de COMPRA.", LOG_LEVEL_DEBUG);
-            return;
-        }
         double takeProfit = EncontrarProximoNivelSuperior(linhas, indice_linha, rates[0].close); // TP acima
         if(takeProfit > 0)
         {
             double precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-            //double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
-            double stop_calc = linhas[indice_linha] - (incrementoTickCurrent * (percentualStopLoss/100.0));
+            double stop_calc = linhas[indice_linha] - (incremento * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
             double stop_loss = MathMin(roundPriceH9K(stop_calc, tickSize), precoEntrada - tickSize);
             if (stop_loss >= precoEntrada) stop_loss = precoEntrada - tickSize;
             if ((precoEntrada - stop_loss) < minDist)
                 stop_loss = precoEntrada - minDist;
-            LogMsg("DEBUG: (TESTE) Compra - entrada: " + DoubleToString(precoEntrada, _Digits) + " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
-            LogMsg("DEBUG: Diferença SL: " + DoubleToString(MathAbs(precoEntrada - stop_loss), _Digits) + " Diferença TP: " + DoubleToString(MathAbs(takeProfit - precoEntrada), _Digits), LOG_LEVEL_DEBUG);
-            
-            // Validação para COMPRA
-            LogMsg("DEBUG: Validação COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
-                   " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
-            LogMsg("DEBUG: Condições - stop < entrada: " + (stop_loss < precoEntrada ? "SIM" : "NÃO"), LOG_LEVEL_DEBUG);
-            LogMsg("DEBUG: Distância SL: " + DoubleToString(precoEntrada - stop_loss, _Digits) + ", Distância TP: " + DoubleToString(takeProfit - precoEntrada, _Digits), LOG_LEVEL_DEBUG);
-            
+            // TP parciais
+            double tp1 = precoEntrada + (incremento * percentualStopLoss / 100.0);
+            double tp2 = takeProfit;
+            double tp3 = linhas[0]; // maior linha (mais distante acima)
             if(stop_loss < precoEntrada && takeProfit > precoEntrada &&
                (precoEntrada - stop_loss > stopLevel) && (takeProfit - precoEntrada > stopLevel)) {
-                LogMsg("DEBUG: Executando COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
-                       " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
-                if (ExecutarCompra(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize))) {
+                if (ExecutarCompra(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), 0)) {
                     ultimoCandleEntrada = rateGatilho.time;
+                    canalEntradaIndex = indice_linha; // Salva o canal da entrada
+                    alvo_breakeven = tp2; // Salva o TP1 para filtro do breakeven
+                    posicaoTicket = trade.ResultOrder(); // Salva o ticket da posição aberta
+                    // Criar ordens Sell Limit para as parciais
+                    trade.SellLimit(vol1, roundPriceH9K(tp1, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 1");
+                    trade.SellLimit(vol2, roundPriceH9K(tp2, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 2");
+                    trade.SellLimit(vol3, roundPriceH9K(tp3, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 3");
                 }
-                
             } else {
                 LogMsg("ERRO: Preços inválidos para COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
                        " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits) +
@@ -835,43 +720,66 @@ void VerificarEntradas(double &linhas[], int indice_linha){
     // Venda: fechamento abaixo da linha -> EXECUTA VENDA
     else if( rates[0].close < linhas[indice_linha] 
           && rateGatilho.low > SymbolInfoDouble(_Symbol, SYMBOL_ASK)  ){ 
-        // Permite apenas uma ordem aberta ou pendente por vez
-        if (has_open_position(MagicNumber) || has_open_order(MagicNumber)) {
-            LogMsg("INFO: Já existe uma posição ou ordem pendente aberta. Não será aberta nova ordem de VENDA.", LOG_LEVEL_INFO);
-            return;
-        }
         double takeProfit = EncontrarProximoNivelInferior(linhas, indice_linha, rates[0].close); // TP abaixo
         if(takeProfit > 0)
         {
             double precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-            //double tamanhoCandle = MathAbs(rateGatilho.high - rateGatilho.low);
-            double stop_calc = linhas[indice_linha] + (incrementoTickCurrent * (percentualStopLoss/100.0));
+            double stop_calc = linhas[indice_linha] + (incremento * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
             double stop_loss = MathMax(roundPriceH9K(stop_calc, tickSize), precoEntrada + tickSize);
             if (stop_loss <= precoEntrada) stop_loss = precoEntrada + tickSize;
             if ((stop_loss - precoEntrada) < minDist)
                 stop_loss = precoEntrada + minDist;
-            LogMsg("DEBUG: (TESTE) Venda - entrada: " + DoubleToString(precoEntrada, _Digits) + " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
-            LogMsg("DEBUG: Diferença SL: " + DoubleToString(MathAbs(precoEntrada - stop_loss), _Digits) + " Diferença TP: " + DoubleToString(MathAbs(takeProfit - precoEntrada), _Digits), LOG_LEVEL_DEBUG);
-            
-            // Validação para VENDA
-            LogMsg("DEBUG: Validação VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
-                   " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
-            LogMsg("DEBUG: Condições - stop > entrada: " + (stop_loss > precoEntrada ? "SIM" : "NÃO"), LOG_LEVEL_DEBUG);
-            LogMsg("DEBUG: Distância SL: " + DoubleToString(stop_loss - precoEntrada, _Digits) + ", Distância TP: " + DoubleToString(precoEntrada - takeProfit, _Digits), LOG_LEVEL_DEBUG);
-            
+            // TP parciais
+            double tp1 = precoEntrada - (incremento * percentualStopLoss / 100.0);
+            double tp2 = takeProfit;
+            double tp3 = linhas[ArraySize(linhas)-1]; // menor linha (mais distante abaixo)
             if(stop_loss > precoEntrada && takeProfit < precoEntrada &&
                (stop_loss - precoEntrada > stopLevel) && (precoEntrada - takeProfit > stopLevel)) {
-                LogMsg("DEBUG: Executando VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
-                       " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits), LOG_LEVEL_DEBUG);
-                if (ExecutarVenda(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), roundPriceH9K(takeProfit,tickSize))) {
+                if (ExecutarVenda(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), 0)) {
                     ultimoCandleEntrada = rateGatilho.time;
+                    canalEntradaIndex = indice_linha; // Salva o canal da entrada
+                    alvo_breakeven = tp2; // Salva o TP1 para filtro do breakeven
+                    posicaoTicket = trade.ResultOrder(); // Salva o ticket da posição aberta
+                    // Criar ordens Buy Limit para as parciais
+                    trade.BuyLimit(vol1, roundPriceH9K(tp1, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 1");
+                    trade.BuyLimit(vol2, roundPriceH9K(tp2, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 2");
+                    trade.BuyLimit(vol3, roundPriceH9K(tp3, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 3");
                 }
-                
             } else {
                 LogMsg("ERRO: Preços inválidos para VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
                        " stop: " + DoubleToString(stop_loss, _Digits) + " tp: " + DoubleToString(takeProfit, _Digits) +
                        " (verifique se SL/TP respeitam o stop level mínimo: " + DoubleToString(stopLevel, _Digits) + ")", LOG_LEVEL_ERROR);
+            }
+        }
+    }
+}
+
+// Função de breakeven por canal, usando posicaoAberta e filtro TP1
+void GerenciarBreakevenPorCanal(double &linhas[]) {
+    if (posicaoAberta && canalEntradaIndex >= 0 && posicaoTicket > 0) {
+        if(!PositionSelectByTicket(posicaoTicket)) return; // Seleciona a posição pelo ticket
+        if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) return;
+        double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        double slAtual = PositionGetDouble(POSITION_SL);
+        ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        double precoAtual = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        // Só ativa breakeven se o preço já atingiu o TP1
+        if ((type == POSITION_TYPE_BUY && precoAtual >= alvo_breakeven) ||
+            (type == POSITION_TYPE_SELL && precoAtual <= alvo_breakeven)) {
+            // COMPRA: se preço >= canalEntrada+1, move SL para canalEntrada
+            if (type == POSITION_TYPE_BUY && canalEntradaIndex < ArraySize(linhas)-1) {
+                if (precoAtual >= linhas[canalEntradaIndex+1] && (slAtual < linhas[canalEntradaIndex] || slAtual == 0)) {
+                    trade.PositionModify(_Symbol, roundPriceH9K(linhas[canalEntradaIndex]+tickSize,tickSize), PositionGetDouble(POSITION_TP));
+                    LogMsg("Breakeven BUY por canal: SL movido para canal " + IntegerToString(canalEntradaIndex) + " (" + DoubleToString(linhas[canalEntradaIndex], _Digits) + ")", LOG_LEVEL_INFO);
+                }
+            }
+            // VENDA: se preço <= canalEntrada-1, move SL para canalEntrada
+            else if (type == POSITION_TYPE_SELL && canalEntradaIndex > 0) {
+                if (precoAtual <= linhas[canalEntradaIndex-1] && (slAtual > linhas[canalEntradaIndex] || slAtual == 0)) {
+                    trade.PositionModify(_Symbol, roundPriceH9K(linhas[canalEntradaIndex]-tickSize,tickSize), PositionGetDouble(POSITION_TP));
+                    LogMsg("Breakeven SELL por canal: SL movido para canal " + IntegerToString(canalEntradaIndex) + " (" + DoubleToString(linhas[canalEntradaIndex], _Digits) + ")", LOG_LEVEL_INFO);
+                }
             }
         }
     }
@@ -882,46 +790,36 @@ void VerificarEntradas(double &linhas[], int indice_linha){
 //+------------------------------------------------------------------+
 bool ExecutarCompra(double preco_entrada, double stop_loss, double take_profit)
 {
-    // Abre a ordem principal de compra
     bool order_sent = trade.Buy(Volume, _Symbol, preco_entrada, stop_loss, take_profit, EnumToString(orginSelect) + " : " + _Symbol);
-    if(!orderRejected(trade.ResultRetcode())) {
-      while(!HasPosition(MagicNumber) && !IsStopped()) { 
-      //se der algun status bizarro pode entrar em loop.
-             Print("waiting for order to be filled...");
-             Sleep(500);
-      }                
-     }else{
-        LogMsg("INFO: Ordem de COMPRA executada - Volume: " + DoubleToString(Volume, 2) +
-               " SL: " + DoubleToString(stop_loss, _Digits) +
-               " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
-      return true;
-     }
-    
-    LogMsg("ERRO ao executar ordem de COMPRA: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
-    return false;
+    uint retcode = trade.ResultRetcode();
+    if(!order_sent || retcode != TRADE_RETCODE_DONE) {
+        LogMsg("ERRO ao executar ordem de COMPRA: Retcode " + IntegerToString(retcode), LOG_LEVEL_ERROR);
+        return false;
+    }
+    LogMsg("INFO: Ordem de COMPRA executada - Volume: " + DoubleToString(Volume, 2) +
+           " PE: " + DoubleToString(preco_entrada, _Digits) +
+           " SL: " + DoubleToString(stop_loss, _Digits) +
+           " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
+    posicaoAberta = true;
+    return order_sent;
 }
 
 //+------------------------------------------------------------------+
 //| Executa ordem de venda                                            |
 //+------------------------------------------------------------------+
 bool ExecutarVenda(double preco_entrada, double stop_loss, double take_profit){
-    // Abre a ordem principal de venda
     bool order_sent = trade.Sell(Volume, _Symbol, preco_entrada, stop_loss, take_profit, EnumToString(orginSelect) + " : " + _Symbol);
-    if(!orderRejected(trade.ResultRetcode())) {
-      while(!HasPosition(MagicNumber) && !IsStopped()) { 
-      //se der algun status bizarro pode entrar em loop.
-             Print("waiting for order to be filled...");
-             Sleep(500);
-      }                
-     }else {
-     LogMsg("INFO: Ordem de VENDA executada - Volume: " + DoubleToString(Volume, 2) +
-               " SL: " + DoubleToString(stop_loss, _Digits) +
-               " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
-        return true;
-     }
-    
-    LogMsg("ERRO: Error ao executar ordem de VENDA: " + IntegerToString(trade.ResultRetcode()), LOG_LEVEL_ERROR);
-    return false;
+    uint retcode = trade.ResultRetcode();
+    if(!order_sent || retcode != TRADE_RETCODE_DONE) {
+        LogMsg("ERRO ao executar ordem de VENDA: Retcode " + IntegerToString(retcode), LOG_LEVEL_ERROR);
+        return false;
+    }
+    LogMsg("INFO: Ordem de VENDA executada - Volume: " + DoubleToString(Volume, 2) +
+           " PE: " + DoubleToString(preco_entrada, _Digits) +
+           " SL: " + DoubleToString(stop_loss, _Digits) +
+           " TP: " + DoubleToString(take_profit, _Digits), LOG_LEVEL_INFO);
+    posicaoAberta = true;
+    return order_sent;
 }
 
 
@@ -949,7 +847,7 @@ bool waitForOrderExecution(double amount, ulong magicNumber) {
 //+------------------------------------------------------------------+
 double EncontrarProximoNivelSuperior(double &linhas[], int indice_atual, double preco_ref)
 {
-    for(int j = indice_atual - 1; j < ArraySize(linhas); j++)
+    for(uint j = (indice_atual > 0 ? (uint)(indice_atual - 1) : 0); j < ArraySize(linhas); j++)
     {
         if(linhas[j] > preco_ref)
             return linhas[j];
@@ -962,7 +860,8 @@ double EncontrarProximoNivelSuperior(double &linhas[], int indice_atual, double 
 //+------------------------------------------------------------------+
 double EncontrarProximoNivelInferior(double &linhas[], int indice_atual, double preco_ref)
 {
-    for(int j = indice_atual + 1; j >= 0; j--)
+    int size = (int)ArraySize(linhas);
+    for(int j = indice_atual + 1; j >= 0 && j < size; j--)
     {
         if(linhas[j] < preco_ref)
             return linhas[j];
@@ -997,23 +896,18 @@ int ConverterHorarioParaMinutos(string horario)
 {
     string partes[];
     int numPartes = StringSplit(horario, ':', partes);
-    
-    if (numPartes != 2)
-    {
-        LogMsg("Erro: Formato de horário inválido. Use HH:MM", LOG_LEVEL_ERROR);
+    if (numPartes < 2) {
+        LogMsg("Erro: Formato de horário inválido. Use HH:MM ou HH:MM:SS", LOG_LEVEL_ERROR);
         return -1;
     }
-    
     int horas = (int)StringToInteger(partes[0]);
     int minutos = (int)StringToInteger(partes[1]);
-    
     // Validar valores
-    if (horas < 0 || horas > 23 || minutos < 0 || minutos > 59)
-    {
+    if (horas < 0 || horas > 23 || minutos < 0 || minutos > 59) {
         LogMsg("Erro: Horário inválido. Horas: 0-23, Minutos: 0-59", LOG_LEVEL_ERROR);
         return -1;
     }
-    
+    // Aceita segundos, mas ignora
     return horas * 60 + minutos;
 }
 
@@ -1161,8 +1055,10 @@ bool has_open_position(ulong magic) {
     for(int i = 0; i < PositionsTotal(); i++) {
         ulong ticket = PositionGetTicket(i);
         if(PositionSelectByTicket(ticket)) {
-            if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
-               PositionGetInteger(POSITION_MAGIC) == magic) {
+            LogMsg("DEBUG: Ticket encontrado: " + IntegerToString(ticket) +
+                   " Symbol: " + PositionGetString(POSITION_SYMBOL) +
+                   " Magic: " + IntegerToString(PositionGetInteger(POSITION_MAGIC)), LOG_LEVEL_DEBUG);
+            if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == magic) {
                 return true;
             }
         }
@@ -1202,24 +1098,6 @@ void LiberarLockDrawdown() {
     vTargetLockDrawdownLogDone = false;
 }
 
-//+------------------------------------------------------------------+
-//| Função utilitária para calcular o novo stop do breakeven         |
-//+------------------------------------------------------------------+
-double CalcularNovoStopBreakeven(ENUM_POSITION_TYPE tipo, double precoEntrada, double precoAtual) {
-    double novoStop = precoEntrada;
-    if(tipo == POSITION_TYPE_BUY) {
-        if (precoAtual > precoEntrada + tickSize)
-            novoStop = precoEntrada + tickSize;
-        if (novoStop > precoAtual)
-            novoStop = precoAtual - tickSize; // Segurança: nunca acima do preço atual
-    } else if(tipo == POSITION_TYPE_SELL) {
-        if (precoAtual < precoEntrada - tickSize)
-            novoStop = precoEntrada - tickSize;
-        if (novoStop < precoAtual)
-            novoStop = precoAtual + tickSize; // Segurança: nunca abaixo do preço atual
-    }
-    return novoStop;
-}
 
 //+------------------------------------------------------------------+
 //| Função para atualizar estatísticas de operações do dia           |
@@ -1238,7 +1116,7 @@ void AtualizarEstatisticasOperacoes() {
                 datetime closeTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
                 if(closeTime >= diaInicio) {
                     long entryType = HistoryDealGetInteger(ticket, DEAL_ENTRY);
-                    if(entryType == DEAL_ENTRY_OUT || entryType == DEAL_ENTRY_INOUT) { // saída de posição
+                    if(entryType == (long)DEAL_ENTRY_OUT || entryType == (long)DEAL_ENTRY_INOUT) { // saída de posição
                         qtdOperacoes++;
                         profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
                         if(profit > 0.0)
@@ -1288,7 +1166,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
-    CDealInfo m_deal;
+     CDealInfo m_deal;
 
     ENUM_ORDER_STATE lastOrderState = trans.order_state;
 
@@ -1297,9 +1175,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         //--- identificador da transação no sistema externo - bilhete atribuído pela bolsa
         string Exchange_ticket="";
         if(lastOrderState==ORDER_STATE_FILLED) {
-            Print("Ordem executada");
+            //Print("Ordem executada");
         } else if (lastOrderState == ORDER_STATE_CANCELED) {
-            Print("Ordem cancelada");
+            //Print("Ordem cancelada");
         }
     }
     break;
@@ -1316,8 +1194,72 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             Print(__FILE__," ",__FUNCTION__,", ERROR: InfoInteger(DEAL_REASON,reason)");
             return;
         }
-        
+        if (m_deal.Magic() == MagicNumber) {
+            if((ENUM_DEAL_REASON)reason==DEAL_REASON_SL)
+                Print("Stop Loss activation");
+            else if((ENUM_DEAL_REASON)reason == DEAL_REASON_TP)
+                vTPTrigger = true; //só libera para repor quando tem TP
+        }
     }
     break;
     }
+    // Após eventos de fechamento de posição
+    AtualizarStatusPosicao();
+
+    // Se não houver mais posição aberta, cancela ordens pendentes de parciais
+    if (!posicaoAberta) {
+        CancelarOrdensParciais();
+    }
 }
+
+// Ao fechar posição (em GerenciarBreakeven, GerenciarSaidasParciaisProgressivas, OnTradeTransaction, etc), setar posicaoAberta = false quando não houver mais posição
+// Exemplo: após detectar que não há mais posição aberta
+void AtualizarStatusPosicao() {
+    posicaoAberta = has_open_position(MagicNumber);
+    ordensAberta = has_open_order(MagicNumber);
+}
+// Chamar AtualizarStatusPosicao após eventos de fechamento de posição
+//+------------------------------------------------------------------+
+//| Função para log com nível                                        |
+//+------------------------------------------------------------------+
+void LogMsg(string mensagem, LOG_LEVEL nivel)
+{
+   if (MostrarLogs == sim && nivel <= LogLevel) {
+    if (nivel == LOG_LEVEL_ERROR) {
+        Alert(mensagem);
+    } else if (nivel == LOG_LEVEL_INFO) {
+           Print(mensagem);
+    } else if (nivel == LOG_LEVEL_DEBUG) {
+        Print(mensagem);
+    }
+}
+}
+
+//+------------------------------------------------------------------+
+//| Função para calcular Magic Number único e consistente             |
+//+------------------------------------------------------------------+
+ulong CalcularMagicNumber(const string eaName, const string symbol) {
+    ulong hash = 5381;
+    string key = eaName + ":" + symbol;
+    for(int i = 0; i < StringLen(key); i++) {
+        hash = ((hash << 5) + hash) + (uchar)StringGetCharacter(key, i); // hash * 33 + c
+    }
+    // Garante que o número não seja zero e caiba em 9 dígitos (limite do MetaTrader)
+    hash = hash % 1000000000ULL;
+    if(hash == 0) hash = 1;
+    return hash;
+}
+
+// Cancelar ordens limitadas pendentes ao fechar posição
+double CancelarOrdensParciais() {
+    for(int i = OrdersTotal() - 1; i >= 0; i--) {
+        ulong ticket = OrderGetTicket(i);
+        if(OrderSelect(ticket)) {
+            if(OrderGetInteger(ORDER_MAGIC) == MagicNumber && OrderGetString(ORDER_SYMBOL) == _Symbol)  {
+               trade.OrderDelete(ticket);
+            }
+        }
+    }
+    return 0;
+}
+// Chame CancelarOrdensParciais() após fechar posição ou no OnTick se não houver posição aberta.
