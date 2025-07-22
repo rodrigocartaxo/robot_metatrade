@@ -675,7 +675,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         return;
     }
     if (posicaoAberta) {
-        LogMsg("ENTRADA BLOQUEADA: Existem posicaoes abertas", LOG_LEVEL_INFO);
+        LogMsg("ENTRADA BLOQUEADA: Existem posicaoes abertas", LOG_LEVEL_DEBUG);
         return;
     }
     
