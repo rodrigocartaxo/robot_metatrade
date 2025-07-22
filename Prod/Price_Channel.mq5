@@ -173,6 +173,9 @@ int OnInit(){
         return INIT_FAILED;
     }
     
+    
+    Comment(EnumToString(orginSelect));
+    
     ChartSetSymbolPeriod(0, _Symbol, Periodo);
     ChartSetInteger(0, CHART_COLOR_BACKGROUND, clrBlack); // Fundo preto
     ChartSetInteger(0, CHART_COLOR_FOREGROUND, clrLightGreen); // Eixos, preço, tempo em verde claro
@@ -375,15 +378,14 @@ void OnTick(){
       }  
     }
    
-   // No OnTick, só chama VerificarGatilhos se !posicaoAberta 
-   if (!posicaoAberta) {
+   // No OnTick, só chama VerificarGatilhos 
      if(nivelIndex >= 0 && nivelIndex < ArraySize(niveis)){
             VerificarGatilhos(linhasPreco);
         }
-    }
+   
     
     // Gerenciamento de breakeven por canal
-    if (posicaoAberta && canalEntradaIndex >= 0 && !breakevenAtivado) {
+    /*if (posicaoAberta && canalEntradaIndex >= 0 && !breakevenAtivado) {
         double precoAtual = 0;
         if(PositionSelectByTicket(posicaoTicket)) {
             ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
@@ -394,7 +396,7 @@ void OnTick(){
                 breakevenAtivado = true;
             }
         }
-    }
+    }*/
 
     // Cancela ordens pendentes de parciais se não houver mais posição aberta
     if (!posicaoAberta) {
@@ -672,6 +674,11 @@ void VerificarEntradas(double &linhas[], int indice_linha){
         LogMsg("ENTRADA BLOQUEADA: Algum lock de risco está ativo (Meta, Loss ou Drawdown)", LOG_LEVEL_DEBUG);
         return;
     }
+    if (posicaoAberta) {
+        LogMsg("ENTRADA BLOQUEADA: Existem posicaoes abertas", LOG_LEVEL_INFO);
+        return;
+    }
+    
     double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
     LogMsg("DEBUG: StopLevel exigido pelo ativo: " + DoubleToString(stopLevel, _Digits), LOG_LEVEL_DEBUG);
     LogMsg("DEBUG: TickSize do ativo: " + DoubleToString(tickSize, _Digits), LOG_LEVEL_DEBUG);
@@ -706,9 +713,9 @@ void VerificarEntradas(double &linhas[], int indice_linha){
                     alvo_breakeven = tp2; // Salva o TP1 para filtro do breakeven
                     posicaoTicket = trade.ResultOrder(); // Salva o ticket da posição aberta
                     // Criar ordens Sell Limit para as parciais
-                    trade.SellLimit(vol1, roundPriceH9K(tp1, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 1");
-                    trade.SellLimit(vol2, roundPriceH9K(tp2, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 2");
-                    trade.SellLimit(vol3, roundPriceH9K(tp3, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 3");
+                    trade.SellLimit(vol1, roundPriceH9K(tp1, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 1");
+                    trade.SellLimit(vol2, roundPriceH9K(tp2, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, EnumToString(orginSelect) +  "Parcial 2");
+                    trade.SellLimit(vol3, roundPriceH9K(tp3, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 3");
                 }
             } else {
                 LogMsg("ERRO: Preços inválidos para COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
@@ -742,9 +749,9 @@ void VerificarEntradas(double &linhas[], int indice_linha){
                     alvo_breakeven = tp2; // Salva o TP1 para filtro do breakeven
                     posicaoTicket = trade.ResultOrder(); // Salva o ticket da posição aberta
                     // Criar ordens Buy Limit para as parciais
-                    trade.BuyLimit(vol1, roundPriceH9K(tp1, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 1");
-                    trade.BuyLimit(vol2, roundPriceH9K(tp2, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 2");
-                    trade.BuyLimit(vol3, roundPriceH9K(tp3, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Parcial 3");
+                    trade.BuyLimit(vol1, roundPriceH9K(tp1, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 1");
+                    trade.BuyLimit(vol2, roundPriceH9K(tp2, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 2");
+                    trade.BuyLimit(vol3, roundPriceH9K(tp3, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 3");
                 }
             } else {
                 LogMsg("ERRO: Preços inválidos para VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
