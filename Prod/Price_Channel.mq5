@@ -191,7 +191,7 @@ int OnInit(){
         return INIT_FAILED;
     }
     
-    MagicNumber = CalcularMagicNumber(MQLInfoString(MQL_PROGRAM_NAME)+EnumToString(orginSelect), _Symbol); 
+    MagicNumber = CalcularMagicNumber(MQLInfoString(MQL_PROGRAM_NAME), _Symbol); 
     // Configurar os níveis
     ArrayResize(niveis, 3);
     
@@ -1246,15 +1246,21 @@ void LogMsg(string mensagem, LOG_LEVEL nivel)
 //| Função para calcular Magic Number único e consistente             |
 //+------------------------------------------------------------------+
 ulong CalcularMagicNumber(const string eaName, const string symbol) {
-    ulong hash = 5381;
-    string key = eaName + ":" + symbol;
-    for(int i = 0; i < StringLen(key); i++) {
-        hash = ((hash << 5) + hash) + (uchar)StringGetCharacter(key, i); // hash * 33 + c
-    }
-    // Garante que o número não seja zero e caiba em 9 dígitos (limite do MetaTrader)
-    hash = hash % 1000000000ULL;
-    if(hash == 0) hash = 1;
-    return hash;
+    string key = StringFormat("%s:%s:%d", eaName, symbol, Periodo);
+   
+   // Inicializa o hash com uma constante não nula
+   ulong hash = 5381;
+   
+   // Calcula o hash usando o algoritmo DJB2
+   for(int i = 0; i < StringLen(key); i++)
+   {
+      hash = ((hash << 5) + hash) + (uchar)StringGetCharacter(key, i); // hash * 33 + c
+   }
+   
+   // Garante que o número caiba em 9 dígitos e não seja zero
+   hash = (hash % 999999999ULL) + 1; // Limite ajustado para 9 dígitos e evita zero
+   
+   return hash;
 }
 
 // Cancelar ordens limitadas pendentes ao fechar posição
