@@ -44,18 +44,18 @@ enum LOG_LEVEL {
 };
 
 //--- input parameters
-input group "Daytrade Window"
+input group " 🕝 Daytrade Window"
 input ENUM_SIM_NAO i24h = nao; //Liga o modo 24h (forex)
-input string iHoraIni  = "09:05:00"; //Hora inicio
+input string iHoraIni  = "09:00:00"; //Hora inicio
 input string iHoraFim  = "17:30:00"; //Hora fim
-input ENUM_SIM_NAO AtivarInterval             = sim;      // Ativar Hora de pausa 
+input ENUM_SIM_NAO AtivarInterval             = nao;      // Ativar Hora de pausa 
 input string iHoraInterval1                   = "12:00"; //Hora Inicio Pausa
 input string iHoraInterval2                   = "13:30"; //Hora Fim Pausa
 
 
 // Parâmetros gerais
 input group "=== Configurações Gerais ==="
-input ENUM_TIMEFRAMES Periodo                 = PERIOD_M2;  // Período do Gráfico
+input ENUM_TIMEFRAMES Periodo                 = PERIOD_M5;  // Período do Gráfico
 input ENUM_CHANNEL_LEVEL NivelAtivo           = NIVEL_1;  // Nível do Canal a Exibir
 input double   Volume                         = 10;       // Alavacagem Lotes
 input ENUM_SIM_NAO MostrarLogs                = sim;      // Mostrar logs detalhados
@@ -74,7 +74,7 @@ input ENUM_LINE_STYLE EstiloLinha             = STYLE_SOLID;  // Estilo das linh
 
 
 input group "=== Risk Management ==="
-input ENUM_SIM_NAO riskManagement            = sim;   // Ativar Risk Management
+input ENUM_SIM_NAO riskManagement            = nao;   // Ativar Risk Management
 input int    iDailyTarget                    = 10000;    // Meta de ganho 
 input int    iLossTarget                     = 500;     // Loss máximo 
 input double iDDTrigger                      = 300;     // Valor para ativar o drawdown
@@ -306,6 +306,7 @@ void OnDeinit(const int reason){
     ChartRedraw(0);
     
     ArrayFree(rates);
+    ArrayFree(niveis);
     LogMsg("EA finalizado. Motivo: " + IntegerToString(reason), LOG_LEVEL_INFO);
 }
 
