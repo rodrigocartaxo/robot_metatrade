@@ -66,6 +66,8 @@ input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas
 input int DesvioMaximoPontos                  = 10; // Desvio máximo permitido (slippage) em pontos
 input int percentualStopLoss                  =  30 ; //Percentual Stoploss x Breakeven ref. Canal
 input string iConfSaidas                      = "5:30,3:60,2:150";
+input string InstanceName                     = "PC1";
+
 
 input group "=== Configurações Canais ==="
 input int      EspessuraLinha                 = 1;      // Espessura das linhas
@@ -711,8 +713,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
     if(rates[0].close > linhas[indice_linha] 
        && rateGatilho.high < SymbolInfoDouble(_Symbol, SYMBOL_BID) ){
         double takeProfit = EncontrarProximoNivelSuperior(linhas, indice_linha, rates[0].close); // TP acima
-        if(takeProfit > 0)
-        {
+        if(takeProfit > 0){
             double precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_BID);
             double stop_calc = linhas[indice_linha] - (incremento * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
@@ -753,8 +754,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
     else if( rates[0].close < linhas[indice_linha] 
           && rateGatilho.low > SymbolInfoDouble(_Symbol, SYMBOL_ASK)  ){ 
         double takeProfit = EncontrarProximoNivelInferior(linhas, indice_linha, rates[0].close); // TP abaixo
-        if(takeProfit > 0)
-        {
+        if(takeProfit > 0){
             double precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
             double stop_calc = linhas[indice_linha] + (incremento * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
@@ -1251,7 +1251,7 @@ void LogMsg(string mensagem, LOG_LEVEL nivel)
 //| Função para calcular Magic Number único e consistente             |
 //+------------------------------------------------------------------+
 ulong CalcularMagicNumber(const string eaName, const string symbol) {
-    string key = StringFormat("%s:%s:%d", eaName, symbol);
+    string key = StringFormat("%s_%s_%s", eaName, symbol, InstanceName);
    
    // Inicializa o hash com uma constante não nula
    ulong hash = 5381;
