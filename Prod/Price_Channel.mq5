@@ -64,9 +64,10 @@ input ENUM_SIM_NAO MostrarPreco               = sim;     // Mostrar preço nas l
 input int numeroLinhas                        =  40 ; //Numero de canais
 input ENUM_ORIGIN orginSelect                 = VIANA; //Origem Lihas 
 input int DesvioMaximoPontos                  = 10; // Desvio máximo permitido (slippage) em pontos
-input int percentualStopLoss                  =  30 ; //Percentual Stoploss x Breakeven ref. Canal
-input string iConfSaidas                      = "5:30,3:60,2:150";
+input int percentualStopLoss                  = 20 ; //Percentual Stoploss x Breakeven ref. Canal
+input string iConfSaidas                      = "6:20,2:50,1:80,1:400";
 input string InstanceName                     = "PC1";
+input int posbreakeven           = 1; // Ativar Brreakeven posicoes restantes
 
 
 input group "=== Configurações Canais ==="
@@ -138,6 +139,8 @@ double nivelBase = 0.0;
 int canalEntradaIndex = -1;
 double alvo_breakeven = 0.0;
 bool breakevenAtivado = false;
+double precoEntrada = 0.0;
+
 
 //+------------------------------------------------------------------+
 //| Estrutura para armazenar configurações de nível                    |
@@ -195,6 +198,8 @@ int OnInit(){
     ChartSetInteger(0, CHART_COLOR_GRID, clrDimGray); // Grid discreto
     ChartSetInteger(0,CHART_SHOW_GRID,false);
     ChartSetInteger(0,CHART_SHOW_VOLUMES,false);
+    ChartSetInteger(0, CHART_AUTOSCROLL, true);
+    ChartSetInteger(0, CHART_SHIFT, true);
     
     ResetLastError();
         
@@ -285,8 +290,7 @@ int OnInit(){
     }
     
     // Forçar redesenho inicial
-    ChartSetInteger(0, CHART_AUTOSCROLL, true);
-    ChartSetInteger(0, CHART_SHIFT, true);
+    
     ChartRedraw(0);
     
     // Configurações de trading
@@ -304,6 +308,8 @@ int OnInit(){
     
 
    calculaVolume();
+   EventSetTimer(5); //Habilitando o timer do MQL5 para rodar a cada 5 segundos
+   
 
     LogMsg(StringFormat("[%d] Inicializado com sucesso!", MagicNumber), LOG_LEVEL_INFO);
     // No início do OnInit, sincronizar a flag com o estado real
@@ -326,14 +332,39 @@ void OnDeinit(const int reason){
     LogMsg("EA finalizado. Motivo: " + IntegerToString(reason), LOG_LEVEL_INFO);
 }
 
+void OnTimer() {
+     
+     if (!breakevenAtivado && HasOrders(MagicNumber) == posbreakeven ){
+         
+         LogMsg("HasOrders(MagicNumber) "+(string) HasOrders(MagicNumber),LOG_LEVEL_INFO);
+         LogMsg("precoEntrada "+(string) precoEntrada,LOG_LEVEL_INFO);
+         
+         if (IsBought(MagicNumber) ) {
+           LogMsg("Ativar IsBought ",LOG_LEVEL_DEBUG);            
+           double newSl =   precoEntrada + (2* tickSize);  
+           changePositionsSL(trade, MagicNumber, roundPriceH9K(newSl,tickSize));        
+           
+         } else if (IsSold(MagicNumber) ) {
+           LogMsg("Ativar IsSold ",LOG_LEVEL_DEBUG);           
+           double newSl = precoEntrada = precoEntrada - (2* tickSize);  
+           changePositionsSL(trade, MagicNumber, newSl );        
+         }
+      
+         breakevenAtivado = true;
+     }
+}
+
 //+------------------------------------------------------------------+
 //| Expert tick function                                              |
 //+------------------------------------------------------------------+
 void OnTick(){
     // Sincroniza a flag com o status real da corretora
     if (isNewBar(Periodo)){
-      posicaoAberta = has_open_position(MagicNumber);
+       posicaoAberta = has_open_position(MagicNumber);
     }
+    
+    
+    
     
     // Novo: verifica se mudou o dia e recarrega config se necessário
     datetime diaAtual = iTime(_Symbol, PERIOD_D1, 0);
@@ -346,7 +377,8 @@ void OnTick(){
                 niveis[nivelIndex].incrementoTick = configGeral.tamanhoCanal;
                 niveis[nivelIndex].nivel = configGeral.nivel;
                 incrementoTickCurrent = niveis[nivelIndex].incrementoTick;
-                
+                precoEntrada = 0.0;
+                breakevenAtivado = false;
                 // Recalcular e recriar linhas para o novo dia
                 LimparObjetos();
                 CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
@@ -405,6 +437,7 @@ void OnTick(){
     // Cancela ordens pendentes de parciais se não houver mais posição aberta
     if (!posicaoAberta) {
         CancelarOrdensParciais();
+        breakevenAtivado = false;
     }
 }
 
@@ -501,6 +534,9 @@ void CalcularLinhasPreco(double &linhas[], NivelCanal &nivel)
 //+------------------------------------------------------------------+
 double calculaVolume(){
     
+   double volumeStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double volumeMin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    
     double volume  = 0.0;
     ParseStringToConfArray(iConfSaidas, niveisSaidas);
     // Mostrar os resultados
@@ -508,7 +544,14 @@ double calculaVolume(){
         LogMsg("Contrato: "+ (string)niveisSaidas[i].qtdContratos+ " | Percentual: "+ (string)niveisSaidas[i].percentSaida, LOG_LEVEL_INFO);
         volume = volume + niveisSaidas[i].qtdContratos;
     }
-    LogMsg("Total de Contrato: "+ (string)volume, LOG_LEVEL_INFO);
+    
+    double resultado = MathRound(volume / volumeStep) * volumeStep;
+      
+      // Garantir que não seja menor que o mínimo
+      if(resultado < volumeMin)
+         resultado = volumeMin;
+         
+    LogMsg("Total de Contrato: "+ DoubleToString(volume), LOG_LEVEL_INFO); 
     return volume;
 }
 
@@ -714,7 +757,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
        && rateGatilho.high < SymbolInfoDouble(_Symbol, SYMBOL_BID) ){
         double takeProfit = EncontrarProximoNivelSuperior(linhas, indice_linha, rates[0].close); // TP acima
         if(takeProfit > 0){
-            double precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_BID);
             double stop_calc = linhas[indice_linha] - (incremento * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
             double stop_loss = MathMin(roundPriceH9K(stop_calc, tickSize), precoEntrada - tickSize);
@@ -755,7 +798,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
           && rateGatilho.low > SymbolInfoDouble(_Symbol, SYMBOL_ASK)  ){ 
         double takeProfit = EncontrarProximoNivelInferior(linhas, indice_linha, rates[0].close); // TP abaixo
         if(takeProfit > 0){
-            double precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            precoEntrada = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
             double stop_calc = linhas[indice_linha] + (incremento * (percentualStopLoss/100.0));
             double minDist = MathMax(stopLevel, tickSize * 2);
             double stop_loss = MathMax(roundPriceH9K(stop_calc, tickSize), precoEntrada + tickSize);
@@ -1221,6 +1264,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
     // Se não houver mais posição aberta, cancela ordens pendentes de parciais
     if (!posicaoAberta) {
         CancelarOrdensParciais();
+        breakevenAtivado = false;
     }
 }
 
@@ -1229,6 +1273,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 void AtualizarStatusPosicao() {
     posicaoAberta = has_open_position(MagicNumber);
     ordensAberta = has_open_order(MagicNumber);
+    
 }
 // Chamar AtualizarStatusPosicao após eventos de fechamento de posição
 //+------------------------------------------------------------------+
@@ -1297,10 +1342,30 @@ void ParseStringToConfArray(string entrada, ConfNivelSaidas &resultArray[]) {
         StringSplit(partes[i], ':', par);
 
         if (ArraySize(par) == 2) {
-            resultArray[i].qtdContratos = (double)StringToInteger(par[0]);
+            resultArray[i].qtdContratos = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) * (double)StringToInteger(par[0]);
             resultArray[i].percentSaida = (double)StringToInteger(par[1]);
         } else {
             Print("Erro ao interpretar: ", partes[i]);
         }
     }
+}
+
+
+int HasOrders(ulong l_magic)
+{
+    int total_orders = OrdersTotal();
+    int open_orders = 0;
+    
+    for(int i = 0; i < total_orders; i++) 
+    {
+        ulong ticket = OrderGetTicket(i);
+        if(ticket > 0 && OrderSelect(ticket))  // Dupla verificação
+        {
+            if(OrderGetInteger(ORDER_MAGIC) == l_magic) 
+            {
+                open_orders++;
+            }
+        }
+    }
+    return open_orders;
 }
