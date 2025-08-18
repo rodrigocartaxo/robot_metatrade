@@ -3,9 +3,12 @@
 //|                                                                      |
 //|                                                                      |
 //+------------------------------------------------------------------+
+#define     MName          "Price Channel"
+#define     MVersion       "1.00"
+
 #property copyright "Copyright 2024"
 #property link      ""
-#property version   "1.00"
+#property version   MVersion
 #property description "Expert Advisor para Price Channel com API externa"
 
 // Inclusão de bibliotecas necessárias
@@ -13,6 +16,7 @@
 #include <Trade\PositionInfo.mqh>
 #include <.\Personal\H9k_Includes\H9k_libs_4.mqh>
 #include <.\Personal\cartaxo_Includes\MyMagicNumber.mqh>
+#include <.\Personal\H9k_Includes\H9k_X_Panel.mqh>
 
 #define ACCOUNT_MARGIN_MODE_NETTING 0
 #define ACCOUNT_MARGIN_MODE_HEDGED  1
@@ -67,7 +71,7 @@ input int DesvioMaximoPontos                  = 10; // Desvio máximo permitido 
 input int percentualStopLoss                  = 20 ; //Percentual Stoploss x Breakeven ref. Canal
 input string iConfSaidas                      = "6:20,2:50,1:80,1:400";
 input string InstanceName                     = "PC1";
-input int posbreakeven           = 1; // Ativar Brreakeven posicoes restantes
+input int posbreakeven                         = 1; // Ativar Brreakeven posicoes restantes
 
 
 input group "=== Configurações Canais ==="
@@ -84,7 +88,9 @@ input double iDDTrigger                      = 300;     // Valor para ativar o d
 input double iDrawDown                       = 20;       // Percentual do valor para fechar posição
 
 
-
+input group "Outros"
+input ENUM_SIM_NAO iClosePositions = sim; //Botão de Pause deve zerar posições
+input ENUM_SIM_NAO iPanel = sim;             //Painel
 
 // Variáveis globais
 double vMaxProfit;
@@ -161,6 +167,25 @@ struct ConfNivelSaidas {
     double percentSaida;
 };
 
+//+------------------------------------------------------------------+
+//| Estrutura para armazenar configurações de saidas  modo   HEDGING |
+//+------------------------------------------------------------------+
+struct IndNivelSaidasHEDGING {
+    double qtdContratos;
+    double valorSaida;
+    bool processada;
+};
+
+
+//+------------------------------------------------------------------+
+//| Estrutura para armazenar configurações de saidas modo   HEDGING  |
+//+------------------------------------------------------------------+
+struct ConfNivelSaidasHEDGING {
+    ulong numeroTicket;
+    ENUM_POSITION_TYPE posType;  
+    IndNivelSaidasHEDGING confSaidasHEDGING [];
+};
+
 
 //+------------------------------------------------------------------+
 //| Estrutura para armazenar dados do JSON                            |
@@ -175,19 +200,20 @@ struct ConfiguracaoCanal {
 NivelCanal niveis[];
 ConfiguracaoCanal configGeral;     // Torna global para uso em OnTick
 ConfNivelSaidas niveisSaidas[];
+ConfNivelSaidasHEDGING niveisSaidasHEDGING;
 //double Volume = 0.0;
+
+CH9kPanel MyPanel;
+bool vPauseEA = false;    
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                     |
 //+------------------------------------------------------------------+
 int OnInit(){
  
- 
-    if (AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_NETTING) {
-        Print("Este EA só pode ser executado em contas em modo NETTING.");
-        return INIT_FAILED;
-    }
+    string modo =  AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_NETTING?"NETTING":"HEDGING";
     
+    LogMsg("Inciando EA em modo: " + modo , LOG_LEVEL_INFO);
     
     Comment(EnumToString(orginSelect));
     
@@ -308,7 +334,31 @@ int OnInit(){
     
 
    calculaVolume();
-   EventSetTimer(5); //Habilitando o timer do MQL5 para rodar a cada 5 segundos
+   
+   
+    if (iPanel) {
+        int _font_size = TerminalInfoInteger(TERMINAL_SCREEN_DPI) == 144 ? 9 : 12;
+        MyPanel.Create(0, StringFormat("%s %s", MName, MVersion), 0, 50, 70, 330, 500, _font_size);
+        MyPanel.CreateItem("status", "Status:", 0);
+        MyPanel.CreateItem("ropen", "Res. Aberto:", 1);
+        MyPanel.CreateItem("rdia",  "Res. Dia:", 2);
+        MyPanel.CreateItem("rweek", "Res. Semana:", 3); 
+        MyPanel.CreateItem("iMagicNumber", "MagicNumber:", 4);
+        MyPanel.CreateItem("channels", "Canais:", 5);
+        MyPanel.CreateItem("risk", "Risk Mgmt:", 6);
+                       
+        
+        MyPanel.UpdateItem("status", "inicializando..");
+        MyPanel.UpdateItem("ropen", DoubleToString(OpenResult(MagicNumber), 2));
+        MyPanel.UpdateItem("rdia", DoubleToString(DailyResult(MagicNumber), 2));
+        MyPanel.UpdateItem("rweek", DoubleToString(weeklyResult(MagicNumber), 2));
+        MyPanel.UpdateItem("iMagicNumber", (string)MagicNumber);
+        MyPanel.UpdateItem("channels", StringFormat("Nível %d", NivelAtivo));
+        MyPanel.UpdateItem("risk", riskManagement == sim ? "Ativo" : "Desativado");
+        MyPanel.Run();
+        ChartRedraw(0);
+    }
+    EventSetTimer(5); //Habilitando o timer do MQL5 para rodar a cada 5 segundos
    
 
     LogMsg(StringFormat("[%d] Inicializado com sucesso!", MagicNumber), LOG_LEVEL_INFO);
@@ -329,41 +379,79 @@ void OnDeinit(const int reason){
     ArrayFree(rates);
     ArrayFree(niveis);
     ArrayFree(niveisSaidas);
+     if (iPanel)
+        MyPanel.Destroy(reason);
+        
+    EventKillTimer();
     LogMsg("EA finalizado. Motivo: " + IntegerToString(reason), LOG_LEVEL_INFO);
 }
 
 void OnTimer() {
      
-     if (!breakevenAtivado && HasOrders(MagicNumber) == posbreakeven ){
+     int pos_proces = count_pos_process();
+     int numTotal  = ArraySize(niveisSaidasHEDGING.confSaidasHEDGING);
+     
+     if (!breakevenAtivado && (numTotal-pos_proces) == posbreakeven ){
          
          LogMsg("HasOrders(MagicNumber) "+(string) HasOrders(MagicNumber),LOG_LEVEL_INFO);
          LogMsg("precoEntrada "+(string) precoEntrada,LOG_LEVEL_INFO);
          
          if (IsBought(MagicNumber) ) {
            LogMsg("Ativar IsBought ",LOG_LEVEL_DEBUG);            
-           double newSl =   precoEntrada + (2* tickSize);  
+           double newSl =   precoEntrada - (2* tickSize);  
            changePositionsSL(trade, MagicNumber, roundPriceH9K(newSl,tickSize));        
            
          } else if (IsSold(MagicNumber) ) {
            LogMsg("Ativar IsSold ",LOG_LEVEL_DEBUG);           
-           double newSl = precoEntrada = precoEntrada - (2* tickSize);  
+           double newSl = precoEntrada = precoEntrada + (2* tickSize);  
            changePositionsSL(trade, MagicNumber, newSl );        
          }
       
          breakevenAtivado = true;
      }
+   
+   if (iPanel) {
+        MyPanel.UpdateItem("ropen", DoubleToString(OpenResult(MagicNumber), 2));
+        MyPanel.UpdateItem("rdia", DoubleToString(DailyResult(MagicNumber), 2));
+        MyPanel.UpdateItem("rweek", DoubleToString(weeklyResult(MagicNumber), 2));
+        
+        // Atualizar status geral
+        if (vPauseEA) {
+            MyPanel.UpdateItem("status", "pausado");
+        } else if (has_open_position(MagicNumber)) {
+            MyPanel.UpdateItem("status", "posição aberta");
+        } else if (HasOrders(MagicNumber)) {
+            MyPanel.UpdateItem("status", "aguardando entrada");
+        } else {
+            MyPanel.UpdateItem("status", "aguardando canal");
+        }
+        
+        ChartRedraw(0);
+    }
+    
+    if (vPauseEA) {
+        if (iPanel) {
+            MyPanel.UpdateItem("status", "pausado");
+            ChartRedraw(0);
+        }
+        return;
+    }
+    
+         
+     
+     
 }
 
 //+------------------------------------------------------------------+
 //| Expert tick function                                              |
 //+------------------------------------------------------------------+
 void OnTick(){
+    if (vPauseEA) return;
+    
     // Sincroniza a flag com o status real da corretora
     if (isNewBar(Periodo)){
        posicaoAberta = has_open_position(MagicNumber);
     }
-    
-    
     
     
     // Novo: verifica se mudou o dia e recarrega config se necessário
@@ -381,8 +469,12 @@ void OnTick(){
                 breakevenAtivado = false;
                 // Recalcular e recriar linhas para o novo dia
                 LimparObjetos();
+                ArrayResize(niveisSaidasHEDGING.confSaidasHEDGING, 0);
+                niveisSaidasHEDGING.numeroTicket = 0;
                 CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
                 CriarLinhasNivel(niveis[nivelIndex]);
+                if (iPanel)
+                  MyPanel.UpdateItem("status", "novo dia carregado");
                 ChartRedraw(0);
                 LogMsg("Configuração do canal recarregada para o novo dia.", LOG_LEVEL_INFO);
             }
@@ -438,10 +530,87 @@ void OnTick(){
     if (!posicaoAberta) {
         CancelarOrdensParciais();
         breakevenAtivado = false;
+        niveisSaidasHEDGING.numeroTicket = 0;
+        CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
+    }else{
+         posicaonaOrdensSaidasHeedgin(niveisSaidasHEDGING);
     }
 }
 
+void posicaonaOrdensSaidasHeedgin(ConfNivelSaidasHEDGING &array){
 
+   if(!PositionSelectByTicket(array.numeroTicket)) {
+       return;     
+    }
+   
+  
+   
+   double priceAtual;
+   if(array.posType == POSITION_TYPE_BUY) {
+        priceAtual = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   } else {
+       priceAtual = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   }
+  
+   
+   
+   for(int i =  0 ; ArraySize(array.confSaidasHEDGING)-1 >=i ; i++) {
+      if (array.confSaidasHEDGING[i].processada){
+         continue;
+      }
+   
+      if(array.posType == POSITION_TYPE_BUY && priceAtual >= array.confSaidasHEDGING[i].valorSaida) {
+         bool order_sent =  trade.PositionClosePartial(array.numeroTicket,array.confSaidasHEDGING[i].qtdContratos,DesvioMaximoPontos);
+         uint retcode = trade.ResultRetcode();
+         if(!order_sent || retcode != TRADE_RETCODE_DONE ) {
+            LogMsg("ERRO ao executar ordem de COMPRA: Retcode " + IntegerToString(retcode), LOG_LEVEL_ERROR);
+            LogMsg("ERRO ao executar ordem de COMPRA: order_sent " + (string)order_sent, LOG_LEVEL_ERROR);
+           continue ;
+          }
+       
+        niveisSaidasHEDGING.confSaidasHEDGING[i].processada = true;
+        LogMsg("INFO: Fechamento parcial executada -   Valor: " + DoubleToString(array.confSaidasHEDGING[i].valorSaida, 2)+
+                                                     " Volume: "  +   DoubleToString(array.confSaidasHEDGING[i].qtdContratos,2)      , LOG_LEVEL_INFO);
+       
+        if (iPanel)
+                  MyPanel.UpdateItem("status", "protecao feita");
+        continue;
+       } else if(array.posType == POSITION_TYPE_SELL && priceAtual <= array.confSaidasHEDGING[i].valorSaida) {
+         bool order_sent =  trade.PositionClosePartial(array.numeroTicket,array.confSaidasHEDGING[i].qtdContratos,DesvioMaximoPontos);
+         uint retcode = trade.ResultRetcode();
+        if(!order_sent || retcode != TRADE_RETCODE_DONE ) {
+            LogMsg("ERRO ao executar ordem de COMPRA: Retcode " + IntegerToString(retcode), LOG_LEVEL_ERROR);
+            LogMsg("ERRO ao executar ordem de COMPRA: order_sent " + (string)order_sent, LOG_LEVEL_ERROR);
+           continue ;
+          }
+         LogMsg("INFO: Fechamento parcial executada -  Valor: " + DoubleToString(array.confSaidasHEDGING[i].valorSaida, 2)+
+                                                     " Volume: "  +   DoubleToString(array.confSaidasHEDGING[i].qtdContratos,2)      , LOG_LEVEL_INFO);
+        
+         niveisSaidasHEDGING.confSaidasHEDGING[i].processada = true;
+         if (iPanel)
+                  MyPanel.UpdateItem("status", "protecao feita");
+                  
+         continue;
+       } 
+        
+   }
+      
+     
+
+}
+
+int count_pos_process(){
+   
+   int count = 0;
+   for(int i =  0 ; ArraySize(niveisSaidasHEDGING.confSaidasHEDGING)-1 >=i ; i++) {
+      if (niveisSaidasHEDGING.confSaidasHEDGING[i].processada){
+        count ++; 
+      }
+
+   }
+   return count;
+
+}
 void GerenciarRisk(){
     double l_result = DailyResult(MagicNumber) + OpenResult(MagicNumber);
     if (l_result > vMaxProfit) vMaxProfit = l_result;
@@ -718,7 +887,9 @@ void VerificarGatilhos(double &linhas[]){
                      "Linha: "+ DoubleToString(linhas[i])+
                      "Open: "+ DoubleToString(rates[1].open)+
                      "Close: "+ DoubleToString(rates[1].close), LOG_LEVEL_DEBUG); 
-                     
+            if (iPanel)
+                 MyPanel.UpdateItem("status", "gatilho acionado");
+                           
             VerificarEntradas(linhas, i);
             break;
         };
@@ -749,9 +920,7 @@ void VerificarEntradas(double &linhas[], int indice_linha){
     double incremento = incrementoTickCurrent;
     double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double volumeStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-    /*double vol1 = MathMax(NormalizeDouble(MathRound((Volume * 0.3) / volumeStep) * volumeStep, 2), minVolume);
-    double vol2 = MathMax(NormalizeDouble(MathRound((Volume * 0.5) / volumeStep) * volumeStep, 2), minVolume);
-    double vol3 = MathMax(NormalizeDouble(MathRound((Volume - vol1 - vol2) / volumeStep) * volumeStep, 2), minVolume);*/
+   
     // Compra: fechamento acima da linha -> EXECUTA COMPRA
     if(rates[0].close > linhas[indice_linha] 
        && rateGatilho.high < SymbolInfoDouble(_Symbol, SYMBOL_BID) ){
@@ -764,27 +933,30 @@ void VerificarEntradas(double &linhas[], int indice_linha){
             if (stop_loss >= precoEntrada) stop_loss = precoEntrada - tickSize;
             if ((precoEntrada - stop_loss) < minDist)
                 stop_loss = precoEntrada - minDist;
-            // TP parciais
-            /*double tp1 = precoEntrada + (incremento * percentualStopLoss / 100.0);
-            double tp2 = takeProfit;
-            double tp3 = linhas[0]; // maior linha (mais distante acima)*/
             if(stop_loss < precoEntrada && takeProfit > precoEntrada &&
                (precoEntrada - stop_loss > stopLevel) && (takeProfit - precoEntrada > stopLevel)) {
                 if (ExecutarCompra(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), 0)) {
                     ultimoCandleEntrada = rateGatilho.time;
                     canalEntradaIndex = indice_linha; // Salva o canal da entrada
-                   
                     posicaoTicket = trade.ResultOrder(); // Salva o ticket da posição aberta                    
                      for (int i = 0; i < ArraySize(niveisSaidas); i++) {
                            double tp =   roundPriceH9K(precoEntrada,tickSize) + (incremento * (niveisSaidas[i].percentSaida/100.0));
                            double vol = MathMax(NormalizeDouble(MathRound(niveisSaidas[i].qtdContratos / volumeStep) * volumeStep, 2), minVolume); 
-                           trade.SellLimit(vol, roundPriceH9K(tp, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial "+ (string)(i+1) );
+                            if ( AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_NETTING){
+                              trade.SellLimit(vol, roundPriceH9K(tp, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial "+ (string)(i+1) );
+                            }else if (AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING){
+                              niveisSaidasHEDGING.numeroTicket = posicaoTicket;
+                              niveisSaidasHEDGING.posType = POSITION_TYPE_BUY;
+                              int tamanho = ArraySize(niveisSaidasHEDGING.confSaidasHEDGING);
+                              ArrayResize(niveisSaidasHEDGING.confSaidasHEDGING, tamanho + 1);
+                              niveisSaidasHEDGING.confSaidasHEDGING[tamanho].qtdContratos =vol;
+                              niveisSaidasHEDGING.confSaidasHEDGING[tamanho].valorSaida = tp;
+                              niveisSaidasHEDGING.confSaidasHEDGING[tamanho].processada = false;
+                           }
+                           
                      
                      }
-                    // Criar ordens Sell Limit para as parciais
-                    /*trade.SellLimit(vol1, roundPriceH9K(tp1, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 1");
-                    trade.SellLimit(vol2, roundPriceH9K(tp2, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0, EnumToString(orginSelect) +  "Parcial 2");
-                    trade.SellLimit(vol3, roundPriceH9K(tp3, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 3");*/
+                    
                 }
             } else {
                 LogMsg("ERRO: Preços inválidos para COMPRA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
@@ -805,28 +977,31 @@ void VerificarEntradas(double &linhas[], int indice_linha){
             if (stop_loss <= precoEntrada) stop_loss = precoEntrada + tickSize;
             if ((stop_loss - precoEntrada) < minDist)
                 stop_loss = precoEntrada + minDist;
-            // TP parciais
-            double tp1 = precoEntrada - (incremento * percentualStopLoss / 100.0);
-            double tp2 = takeProfit;
-            double tp3 = linhas[ArraySize(linhas)-1]; // menor linha (mais distante abaixo)
+            
             if(stop_loss > precoEntrada && takeProfit < precoEntrada &&
                (stop_loss - precoEntrada > stopLevel) && (precoEntrada - takeProfit > stopLevel)) {
                 if (ExecutarVenda(roundPriceH9K(precoEntrada,tickSize), roundPriceH9K(stop_loss,tickSize), 0)) {
                     ultimoCandleEntrada = rateGatilho.time;
                     canalEntradaIndex = indice_linha; // Salva o canal da entrada
-                    alvo_breakeven = tp2; // Salva o TP1 para filtro do breakeven
                     posicaoTicket = trade.ResultOrder(); // Salva o ticket da posição aberta
-                    
                     for (int i = 0; i < ArraySize(niveisSaidas); i++) {
                            double tp =   roundPriceH9K(precoEntrada,tickSize) - (incremento * (niveisSaidas[i].percentSaida/100.0));
                            double vol = MathMax(NormalizeDouble(MathRound(niveisSaidas[i].qtdContratos / volumeStep) * volumeStep, 2), minVolume);
-                           trade.BuyLimit(vol, roundPriceH9K(tp, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial "+ (string)(i+1) );                     
+                           if ( AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_NETTING){
+                              trade.BuyLimit(vol, roundPriceH9K(tp, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial "+ (string)(i+1) );                     
+                           }else if (AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING){
+                              niveisSaidasHEDGING.numeroTicket = posicaoTicket;
+                              niveisSaidasHEDGING.posType = POSITION_TYPE_SELL;
+                              int tamanho = ArraySize(niveisSaidasHEDGING.confSaidasHEDGING);
+                              ArrayResize(niveisSaidasHEDGING.confSaidasHEDGING, tamanho + 1);
+                              niveisSaidasHEDGING.confSaidasHEDGING[tamanho].qtdContratos =vol;
+                              niveisSaidasHEDGING.confSaidasHEDGING[tamanho].valorSaida = tp;
+                              niveisSaidasHEDGING.confSaidasHEDGING[tamanho].processada = false;
+                           }
+                           
                      }
                     
-                    // Criar ordens Buy Limit para as parciais
-                    /*trade.BuyLimit(vol1, roundPriceH9K(tp1, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 1");
-                    trade.BuyLimit(vol2, roundPriceH9K(tp2, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 2");
-                    trade.BuyLimit(vol3, roundPriceH9K(tp3, tickSize), _Symbol, 0, 0, ORDER_TIME_GTC, 0,  EnumToString(orginSelect) + "Parcial 3");*/
+                   
                 }
             } else {
                 LogMsg("ERRO: Preços inválidos para VENDA - entrada: " + DoubleToString(precoEntrada, _Digits) + 
@@ -835,6 +1010,8 @@ void VerificarEntradas(double &linhas[], int indice_linha){
             }
         }
     }
+    
+  
 }
 
 
@@ -1023,7 +1200,7 @@ string FazerChamadaHTTP(string symbol, int nivel)
 //+------------------------------------------------------------------+
 string CriarConfiguracaoPadrao(string symbol, int nivel)
 {
-    string config = "{\"ativo\":\"" + symbol + "\",\"marcoZero\":146014.0,\"tamanhoCanal\":824.38,\"nivel\":" + DoubleToString(nivel) + "}";
+    string config = "{\"ativo\":\"" + symbol + "\",\"marcoZero\":244355.00,\"tamanhoCanal\":7231.37,\"nivel\":" + DoubleToString(nivel) + "}";
     LogMsg("DEBUG: Configuração padrão criada para nível " + IntegerToString(nivel) + ": " + config, LOG_LEVEL_DEBUG);
     return config;
 }
@@ -1263,8 +1440,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 
     // Se não houver mais posição aberta, cancela ordens pendentes de parciais
     if (!posicaoAberta) {
-        CancelarOrdensParciais();
-        breakevenAtivado = false;
+        if (m_deal.Magic() == MagicNumber){
+           CancelarOrdensParciais();
+           breakevenAtivado = false;
+           niveisSaidasHEDGING.numeroTicket = 0;
+           ArrayResize(niveisSaidasHEDGING.confSaidasHEDGING,0);
+           LogMsg("Limpando as variaveis", LOG_LEVEL_INFO);
+        }
     }
 }
 
@@ -1368,4 +1550,119 @@ int HasOrders(ulong l_magic)
         }
     }
     return open_orders;
+}
+//+------------------------------------------------------------------+
+//| Create the "Button1" button                                      |
+//+------------------------------------------------------------------+
+
+bool CH9kPanel::CreateButton1() {
+    int x1 = INDENT_LEFT;
+    int y1 = INDENT_TOP + 170;
+    int x2 = x1 + 250;
+    int y2 = y1 + 50;
+
+    if(!m_button1.Create(m_chart_id, m_name+"_Bt1", m_subwin, x1, y1, x2, y2))
+        return(false);
+
+    if (!vPauseEA) {
+        m_button1.ColorBackground(clrMediumSeaGreen);
+        m_button1.Color(clrBlack);
+        if (iClosePositions) {
+            m_button1.Text("LIMPAR E PAUSAR");
+        } else {
+            m_button1.Text("PAUSAR");
+        }
+    } else {        
+        m_button1.ColorBackground(clrIndianRed);
+        m_button1.Color(C'240,240,240'); 
+        m_button1.Text("INICIAR");
+    }        
+    
+    m_button1.Font(m_font);
+    m_button1.FontSize(m_font_size);    
+    m_button1.ColorBorder(C'64,60,66');
+    
+    if(!Add(m_button1)) {
+        Print("Falha ao registrar botão");
+        return(false);
+    }
+    
+    Print("Botão registrado com ID=", m_button1.Id());
+        
+    ChartRedraw(0);
+    return(true);
+}
+
+
+//+------------------------------------------------------------------+
+//| Botão de limpar e pausar
+//+------------------------------------------------------------------+
+void CH9kPanel::OnClickButton1(void) {
+
+    if (!vPauseEA) {
+    
+        closeAllOpenOrders(trade, MagicNumber);
+        if(iClosePositions && HasPosition(MagicNumber)) {
+            closeAllPositions(trade, MagicNumber);
+        }
+        
+        vPauseEA = true;
+        
+        PrintFormat("[%I64d] Limpando e pausando", MagicNumber);
+        
+        m_button1.Text("INICIAR");
+        m_button1.ColorBackground(clrIndianRed);
+        m_button1.Color(C'240,240,240');
+    } else {
+        vPauseEA = false;
+        PrintFormat("[%I64d] Play...", MagicNumber);
+        
+        if (iClosePositions) {
+            m_button1.Text("LIMPAR E PAUSAR");
+        } else {
+            m_button1.Text("PAUSAR");
+        }
+        m_button1.ColorBackground(clrMediumSeaGreen);
+        m_button1.Color(clrBlack);        
+    }
+    
+    ChartRedraw(0);
+    Sleep(200);
+}
+
+//+------------------------------------------------------------------+
+//| Captura eventos do gráfico - botões                              |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam) {
+
+    //PrintFormat("%d %I64d %.2f %s", id, lparam, dparam, sparam);
+    if (iPanel)
+        MyPanel.ChartEvent(id, lparam, dparam, sparam);
+
+    return;
+
+}
+bool martketIsOpen() {
+    datetime bar_time = iTime(_Symbol, PERIOD_M1, 0);
+
+    // Compara com o dia do servidor, não com o local
+    if (DayOnly(bar_time) != DayOnly(TimeTradeServer())){
+        if (iPanel) {
+            MyPanel.UpdateItem("status", "aguardando abertura");
+            ChartRedraw(0);
+        }
+        return false;
+    }
+    
+    return true;
+}
+//Função para saber se o mercado já abriu e não precisar limitar por horário
+datetime DayOnly(datetime dt) {
+    MqlDateTime t;
+    TimeToStruct(dt, t);
+    t.hour = t.min = t.sec = 0;
+    return StructToTime(t);
 }
