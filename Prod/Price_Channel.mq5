@@ -88,6 +88,12 @@ input double iDDTrigger                      = 300;     // Valor para ativar o d
 input double iDrawDown                       = 20;       // Percentual do valor para fechar posição
 
 
+input group "=== Trailing Stop Inteligente ==="
+input ENUM_SIM_NAO ativarTrailing = sim;     // Ativar trailing stop
+input double percentualAtivacao = 80.0;      // % do lucro máximo para ativar
+input int distanciaCanais = 2;               // Distância em canais para o stop
+input double bufferSeguranca = 0.5;          // Buffer de segurança em %
+
 input group "Outros"
 input ENUM_SIM_NAO iClosePositions = sim; //Botão de Pause deve zerar posições
 input ENUM_SIM_NAO iPanel = sim;             //Painel
@@ -146,6 +152,11 @@ int canalEntradaIndex = -1;
 double alvo_breakeven = 0.0;
 bool breakevenAtivado = false;
 double precoEntrada = 0.0;
+
+// Variáveis para trailing stop inteligente
+bool trailingAtivo = false;
+double lucroMaximoTrailing = 0.0;
+bool trailingInicializado = false;
 
 
 //+------------------------------------------------------------------+
@@ -346,6 +357,7 @@ int OnInit(){
         MyPanel.CreateItem("iMagicNumber", "MagicNumber:", 4);
         MyPanel.CreateItem("channels", "Canais:", 5);
         MyPanel.CreateItem("risk", "Risk Mgmt:", 6);
+        MyPanel.CreateItem("trailing", "Trailing:", 7);
                        
         
         MyPanel.UpdateItem("status", "inicializando..");
@@ -355,6 +367,7 @@ int OnInit(){
         MyPanel.UpdateItem("iMagicNumber", (string)MagicNumber);
         MyPanel.UpdateItem("channels", StringFormat("Nível %d", NivelAtivo));
         MyPanel.UpdateItem("risk", riskManagement == sim ? "Ativo" : "Desativado");
+        MyPanel.UpdateItem("trailing", ativarTrailing == sim ? "Ativo" : "Desativado");
         MyPanel.Run();
         ChartRedraw(0);
     }
@@ -391,6 +404,11 @@ void OnTimer() {
      int pos_proces = count_pos_process();
      int numTotal  = ArraySize(niveisSaidasHEDGING.confSaidasHEDGING);
      
+     // Trailing stop inteligente - SÓ APÓS BREAKEVEN
+     if (ativarTrailing == sim && posicaoAberta && breakevenAtivado) {
+         GerenciarTrailingStop();
+     }
+     
      if (!breakevenAtivado && (numTotal-pos_proces) == posbreakeven ){
          
          LogMsg("HasOrders(MagicNumber) "+(string) HasOrders(MagicNumber),LOG_LEVEL_INFO);
@@ -414,6 +432,17 @@ void OnTimer() {
         MyPanel.UpdateItem("ropen", DoubleToString(OpenResult(MagicNumber), 2));
         MyPanel.UpdateItem("rdia", DoubleToString(DailyResult(MagicNumber), 2));
         MyPanel.UpdateItem("rweek", DoubleToString(weeklyResult(MagicNumber), 2));
+        
+        // Atualizar status do trailing
+        if (ativarTrailing == sim && posicaoAberta && breakevenAtivado) {
+            if (trailingAtivo) {
+                MyPanel.UpdateItem("trailing", "Ativo - " + DoubleToString(lucroMaximoTrailing, 2));
+            } else {
+                MyPanel.UpdateItem("trailing", "Aguardando - " + DoubleToString(percentualAtivacao, 1) + "%");
+            }
+        } else if (ativarTrailing == sim) {
+            MyPanel.UpdateItem("trailing", "Aguardando breakeven");
+        }
         
         // Atualizar status geral
         if (vPauseEA) {
@@ -467,6 +496,10 @@ void OnTick(){
                 incrementoTickCurrent = niveis[nivelIndex].incrementoTick;
                 precoEntrada = 0.0;
                 breakevenAtivado = false;
+                // Reset das variáveis de trailing para novo dia
+                trailingAtivo = false;
+                trailingInicializado = false;
+                lucroMaximoTrailing = 0.0;
                 // Recalcular e recriar linhas para o novo dia
                 LimparObjetos();
                 ArrayResize(niveisSaidasHEDGING.confSaidasHEDGING, 0);
@@ -532,6 +565,11 @@ void OnTick(){
         breakevenAtivado = false;
         niveisSaidasHEDGING.numeroTicket = 0;
         CalcularLinhasPreco(linhasPreco, niveis[nivelIndex]);
+        
+        // Reset das variáveis de trailing
+        trailingAtivo = false;
+        trailingInicializado = false;
+        lucroMaximoTrailing = 0.0;
     }else{
          posicaonaOrdensSaidasHeedgin(niveisSaidasHEDGING);
     }
@@ -1384,6 +1422,22 @@ void PrintEstatisticasRobo() {
     LogMsg("Qtd LOSS: " + IntegerToString(qtdLoss), LOG_LEVEL_INFO);
     LogMsg("Locks: " + locks, LOG_LEVEL_INFO);
     LogMsg("Target diário: " + DoubleToString(iDailyTarget, 2) + ", Loss diário: " + DoubleToString(iLossTarget, 2) + ", Drawdown: " + DoubleToString(iDrawDown, 2) + "%", LOG_LEVEL_INFO);
+    
+    // Informações do trailing stop
+    if (ativarTrailing == sim) {
+        string statusTrailing = "Desativado";
+        if (posicaoAberta && breakevenAtivado) {
+            if (trailingAtivo) {
+                statusTrailing = "Ativo - Max: " + DoubleToString(lucroMaximoTrailing, 2);
+            } else {
+                statusTrailing = "Aguardando " + DoubleToString(percentualAtivacao, 1) + "%";
+            }
+        } else if (posicaoAberta) {
+            statusTrailing = "Aguardando breakeven";
+        }
+        LogMsg("Trailing Stop: " + statusTrailing, LOG_LEVEL_INFO);
+    }
+    
     LogMsg("=================================", LOG_LEVEL_INFO);
 }
 
@@ -1446,6 +1500,11 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
            niveisSaidasHEDGING.numeroTicket = 0;
            ArrayResize(niveisSaidasHEDGING.confSaidasHEDGING,0);
            LogMsg("Limpando as variaveis", LOG_LEVEL_INFO);
+           
+           // Reset das variáveis de trailing
+           trailingAtivo = false;
+           trailingInicializado = false;
+           lucroMaximoTrailing = 0.0;
         }
     }
 }
@@ -1665,4 +1724,184 @@ datetime DayOnly(datetime dt) {
     TimeToStruct(dt, t);
     t.hour = t.min = t.sec = 0;
     return StructToTime(t);
+}
+
+//+------------------------------------------------------------------+
+//| Gerencia o trailing stop inteligente                              |
+//+------------------------------------------------------------------+
+void GerenciarTrailingStop() {
+    if (!posicaoAberta || !breakevenAtivado) return;
+    
+    double lucroAtual = DailyResult(MagicNumber) + OpenResult(MagicNumber);
+    
+    // Inicializa o trailing na primeira execução
+    if (!trailingInicializado) {
+        lucroMaximoTrailing = lucroAtual;
+        trailingInicializado = true;
+        LogMsg("Trailing stop inicializado com lucro: " + DoubleToString(lucroMaximoTrailing, 2), LOG_LEVEL_INFO);
+    }
+    
+    // Atualiza lucro máximo se necessário
+    if (lucroAtual > lucroMaximoTrailing) {
+        lucroMaximoTrailing = lucroAtual;
+        LogMsg("Novo lucro máximo para trailing: " + DoubleToString(lucroMaximoTrailing, 2), LOG_LEVEL_DEBUG);
+    }
+    
+    // Verifica se deve ativar o trailing
+    if (!trailingAtivo && lucroAtual >= (lucroMaximoTrailing * percentualAtivacao / 100.0)) {
+        trailingAtivo = true;
+        LogMsg("Trailing stop ativado! Lucro atual: " + DoubleToString(lucroAtual, 2) + 
+               " (≥ " + DoubleToString(percentualAtivacao, 1) + "% do máximo)", LOG_LEVEL_INFO);
+    }
+    
+    // Se ativo, gerencia o stop
+    if (trailingAtivo) {
+        AjustarStopTrailing();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Ajusta o stop loss baseado no trailing inteligente               |
+//+------------------------------------------------------------------+
+void AjustarStopTrailing() {
+    if (!posicaoAberta || !trailingAtivo || !breakevenAtivado) return;
+    
+    // Obtém informações da posição atual
+    ulong ticket = 0;
+    ENUM_POSITION_TYPE posType = POSITION_TYPE_BUY;
+    double precoEntrada = 0.0;
+    double stopAtual = 0.0;
+    
+    // Encontra a posição aberta
+    for (int i = 0; i < PositionsTotal(); i++) {
+        if (PositionSelectByTicket(PositionGetTicket(i))) {
+            if (PositionGetString(POSITION_SYMBOL) == _Symbol && 
+                PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+                ticket = PositionGetTicket(i);
+                posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                precoEntrada = PositionGetDouble(POSITION_PRICE_OPEN);
+                stopAtual = PositionGetDouble(POSITION_SL);
+                break;
+            }
+        }
+    }
+    
+    if (ticket == 0) {
+        LogMsg("ERRO: Não foi possível encontrar posição para trailing", LOG_LEVEL_ERROR);
+        return;
+    }
+    
+    // Calcula o novo stop baseado nos canais
+    double novoStop = CalcularNovoStopTrailing(posType, canalEntradaIndex);
+    
+    if (novoStop <= 0) {
+        LogMsg("ERRO: Falha ao calcular novo stop para trailing", LOG_LEVEL_ERROR);
+        return;
+    }
+    
+    // Verifica se o novo stop é favorável
+    if (DeveAtualizarStop(posType, stopAtual, novoStop)) {
+        // Executa a atualização do stop
+        if (AtualizarStopLoss(ticket, novoStop)) {
+            LogMsg("Trailing Stop atualizado: " + DoubleToString(stopAtual, _Digits) + 
+                   " → " + DoubleToString(novoStop, _Digits), LOG_LEVEL_INFO);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Calcula o novo stop baseado nos canais                           |
+//+------------------------------------------------------------------+
+double CalcularNovoStopTrailing(ENUM_POSITION_TYPE posType, int canalEntrada) {
+    if (canalEntrada < 0 || canalEntrada >= ArraySize(linhasPreco)) {
+        LogMsg("ERRO: Canal de entrada inválido para trailing", LOG_LEVEL_ERROR);
+        return 0.0;
+    }
+    
+    double novoStop = 0.0;
+    double incremento = incrementoTickCurrent;
+    
+    if (posType == POSITION_TYPE_BUY) {
+        // Para COMPRA: stop abaixo da entrada (canal inferior)
+        int canalStop = canalEntrada + distanciaCanais;
+        if (canalStop < ArraySize(linhasPreco)) {
+            novoStop = linhasPreco[canalStop];
+            // Adiciona buffer de segurança
+            novoStop = novoStop - (incremento * (bufferSeguranca / 100.0));
+        } else {
+            // Se não há canal suficiente, usa o último disponível
+            novoStop = linhasPreco[ArraySize(linhasPreco) - 1];
+        }
+    } else if (posType == POSITION_TYPE_SELL) {
+        // Para VENDA: stop acima da entrada (canal superior)
+        int canalStop = canalEntrada - distanciaCanais;
+        if (canalStop >= 0) {
+            novoStop = linhasPreco[canalStop];
+            // Adiciona buffer de segurança
+            novoStop = novoStop + (incremento * (bufferSeguranca / 100.0));
+        } else {
+            // Se não há canal suficiente, usa o primeiro disponível
+            novoStop = linhasPreco[0];
+        }
+    }
+    
+    // Arredonda para o tick size correto
+    novoStop = roundPriceH9K(novoStop, tickSize);
+    
+    return novoStop;
+}
+
+//+------------------------------------------------------------------+
+//| Verifica se deve atualizar o stop loss                           |
+//+------------------------------------------------------------------+
+bool DeveAtualizarStop(ENUM_POSITION_TYPE posType, double stopAtual, double novoStop) {
+    if (stopAtual == 0) return true; // Primeira vez
+    
+    if (posType == POSITION_TYPE_BUY) {
+        // Para COMPRA: só atualiza se o novo stop for MAIOR (mais favorável)
+        return (novoStop > stopAtual);
+    } else if (posType == POSITION_TYPE_SELL) {
+        // Para VENDA: só atualiza se o novo stop for MENOR (mais favorável)
+        return (novoStop < stopAtual);
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Executa a atualização do stop loss                               |
+//+------------------------------------------------------------------+
+bool AtualizarStopLoss(ulong ticket, double novoStop) {
+    // Verifica se o novo stop respeita o stop level mínimo
+    double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+    double precoAtual = 0.0;
+    
+    if (PositionSelectByTicket(ticket)) {
+        ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        precoAtual = PositionGetDouble(POSITION_PRICE_OPEN);
+        
+        if (posType == POSITION_TYPE_BUY) {
+            if ((precoAtual - novoStop) < stopLevel) {
+                LogMsg("ERRO: Novo stop muito próximo para COMPRA", LOG_LEVEL_ERROR);
+                return false;
+            }
+        } else if (posType == POSITION_TYPE_SELL) {
+            if ((novoStop - precoAtual) < stopLevel) {
+                LogMsg("ERRO: Novo stop muito próximo para VENDA", LOG_LEVEL_ERROR);
+                return false;
+            }
+        }
+    }
+    
+    // Executa a modificação
+    trade.PositionModify(ticket, novoStop, 0);
+    uint retcode = trade.ResultRetcode();
+    
+    if (retcode == TRADE_RETCODE_DONE) {
+        LogMsg("SUCESSO: Stop loss atualizado para " + DoubleToString(novoStop, _Digits), LOG_LEVEL_INFO);
+        return true;
+    } else {
+        LogMsg("ERRO: Falha ao atualizar stop loss. Retcode: " + IntegerToString(retcode), LOG_LEVEL_ERROR);
+        return false;
+    }
 }
